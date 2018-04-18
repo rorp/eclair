@@ -135,6 +135,7 @@ class Setup(datadir: File, overrideDefaults: Config = ConfigFactory.empty(), act
       defaultFeerates = FeeratesPerByte(
         block_1 = config.getLong("default-feerates.delay-blocks.1"),
         blocks_2 = config.getLong("default-feerates.delay-blocks.2"),
+        blocks_3 = config.getLong("default-feerates.delay-blocks.3"),
         blocks_6 = config.getLong("default-feerates.delay-blocks.6"),
         blocks_12 = config.getLong("default-feerates.delay-blocks.12"),
         blocks_36 = config.getLong("default-feerates.delay-blocks.36"),

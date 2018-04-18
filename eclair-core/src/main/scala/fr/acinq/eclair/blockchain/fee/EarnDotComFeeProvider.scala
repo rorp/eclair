@@ -74,6 +74,7 @@ object EarnDotComFeeProvider {
     FeeratesPerByte(
       block_1 = extractFeerate(feeRanges, 1),
       blocks_2 = extractFeerate(feeRanges, 2),
+      blocks_3 = extractFeerate(feeRanges, 3),
       blocks_6 = extractFeerate(feeRanges, 6),
       blocks_12 = extractFeerate(feeRanges, 12),
       blocks_36 = extractFeerate(feeRanges, 36),
