@@ -36,13 +36,13 @@ case class FeeratesPerByte(block_1: Long, blocks_2: Long, blocks_3: Long, blocks
 case class FeeratesPerKw(block_1: Long, blocks_2: Long, blocks_3: Long, blocks_6: Long, blocks_12: Long, blocks_36: Long, blocks_72: Long) {
   require(block_1 > 0 && blocks_2 > 0 && blocks_3 > 0 && blocks_6 > 0 && blocks_12 > 0 && blocks_36 > 0 && blocks_72 > 0, "all feerates must be strictly greater than 0")
   def getFeerate(target: Int) = target match {
-    case 1 => block_1
-    case 2  => blocks_2
-    case n if n >= 3 && n < 6 => blocks_3
-    case n if n >= 6 && n < 12 => blocks_6
-    case n if n >= 12 && n < 36 => blocks_12
-    case n if n >= 36 && n < 72 => blocks_36
-    case n if n >= 72 => blocks_72
+    case n if n <= 1 => block_1
+    case n if n <= 2 => blocks_2
+    case n if n <= 3 => blocks_3
+    case n if n <= 6 => blocks_6
+    case n if n <= 12 => blocks_12
+    case n if n <= 36 => blocks_36
+    case _ => blocks_72
   }
 }
 

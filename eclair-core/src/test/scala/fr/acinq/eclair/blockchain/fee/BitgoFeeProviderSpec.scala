@@ -45,7 +45,7 @@ class BitgoFeeProviderSpec extends FunSuite {
   test("parse test") {
     val json = parse(sample_response)
     val feeRanges = parseFeeRanges(json)
-    assert(feeRanges.size === 23)
+    assert(feeRanges.size === 24)
   }
 
   test("extract fee for a particular block delay") {
@@ -62,7 +62,7 @@ class BitgoFeeProviderSpec extends FunSuite {
     val ref = FeeratesPerByte(
       block_1 = 145,
       blocks_2 = 133,
-      blocks_3 = 115,
+      blocks_3 = 113,
       blocks_6 = 103,
       blocks_12 = 93,
       blocks_36 = 69,

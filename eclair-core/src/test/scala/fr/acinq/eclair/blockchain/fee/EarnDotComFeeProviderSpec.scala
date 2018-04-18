@@ -61,7 +61,7 @@ class EarnDotComFeeProviderSpec extends FunSuite {
     val ref = FeeratesPerByte(
       block_1 = 400,
       blocks_2 = 350,
-      blocks_3 = 350,
+      blocks_3 = 300,
       blocks_6 = 230,
       blocks_12 = 140,
       blocks_36 = 60,
