@@ -79,6 +79,7 @@ The native build requires special dependencies to be built before, to start you 
  cd secp256k1
  git checkout jni_non_static_init
  ./autogen.sh && ./configure --enable-experimental --enable-module_ecdh --enable-jni && make clean && make
+ cd src/java
  mvn install
 ```
 
