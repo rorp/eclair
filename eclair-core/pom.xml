@@ -216,6 +216,11 @@
             <artifactId>kamon-akka_${scala.version.short}</artifactId>
             <version>${kamon.version}</version>
         </dependency>
+        <dependency>
+            <groupId>com.amazonaws</groupId>
+            <artifactId>aws-java-sdk-secretsmanager</artifactId>
+            <version>1.11.703</version>
+        </dependency>
         <!-- TESTS -->
         <dependency>
             <groupId>com.softwaremill.quicklens</groupId>

@@ -108,18 +108,6 @@ object NodeParams {
       .withFallback(overrideDefaults)
       .withFallback(ConfigFactory.load())
 
-  def getSeed(datadir: File): ByteVector = {
-    val seedPath = new File(datadir, "seed.dat")
-    if (seedPath.exists()) {
-      ByteVector(Files.readAllBytes(seedPath.toPath))
-    } else {
-      datadir.mkdirs()
-      val seed = randomBytes32
-      Files.write(seedPath.toPath, seed.toArray)
-      seed
-    }
-  }
-
   def makeChainHash(chain: String): ByteVector32 = {
     chain match {
       case "regtest" => Block.RegtestGenesisBlock.hash

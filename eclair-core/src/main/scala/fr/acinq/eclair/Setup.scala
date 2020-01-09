@@ -40,7 +40,7 @@ import fr.acinq.eclair.blockchain.electrum.db.sqlite.SqliteWalletDb
 import fr.acinq.eclair.blockchain.fee.{ConstantFeeProvider, _}
 import fr.acinq.eclair.blockchain.{EclairWallet, _}
 import fr.acinq.eclair.channel.Register
-import fr.acinq.eclair.crypto.LocalKeyManager
+import fr.acinq.eclair.crypto.{AWSSecretsManagerSeedStorage, FileSeedStorage, LocalKeyManager}
 import fr.acinq.eclair.db.{BackupHandler, Databases}
 import fr.acinq.eclair.io.{Authenticator, Server, Switchboard}
 import fr.acinq.eclair.payment.Auditor
@@ -87,7 +87,7 @@ class Setup(datadir: File,
   datadir.mkdirs()
   val appConfig = NodeParams.loadConfiguration(datadir, overrideDefaults)
   val config = appConfig.getConfig("eclair")
-  val seed = seed_opt.getOrElse(NodeParams.getSeed(datadir))
+  val seed = getSeed(config, seed_opt)
   val chain = config.getString("chain")
   val chaindir = new File(datadir, chain)
   val keyManager = new LocalKeyManager(seed, NodeParams.makeChainHash(chain))
@@ -326,6 +326,28 @@ class Setup(datadir: File,
     case e: TimeoutException =>
       logger.error(messageOnTimeout)
       throw e
+  }
+
+  private def getSeed(config: Config, seed_opt: Option[ByteVector]) = seed_opt match {
+    case Some(seed) => seed
+    case None =>
+      config.getString("seed-storage") match {
+        case "local" => new FileSeedStorage(datadir).loadSeed()
+        case "secretsmanager" =>
+          val secretId = config.getString("aws.secretsmanager.secret-id")
+          val seedKeyName = config.getString("aws.secretsmanager.seed-key-name")
+          val region_opt =
+            if (config.hasPath("aws.region")) {
+              val region = config.getString("aws.region")
+              if (region == null || region.isBlank)
+                None
+              else
+                Some(region)
+            } else
+              None
+          new AWSSecretsManagerSeedStorage(secretId, seedKeyName, region_opt).loadSeed()
+        case s@_ => throw new RuntimeException(s"Unknown seed storage `$s`")
+      }
   }
 
   private def initTor(): Option[NodeAddress] = {
