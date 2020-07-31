@@ -93,9 +93,9 @@
                 </os>
             </activation>
             <properties>
-                <bitcoind.url>https://bitcoincore.org/bin/bitcoin-core-0.19.1/bitcoin-0.19.1-osx64.tar.gz</bitcoind.url>
-                <bitcoind.md5>6687a2df8b8a167b3afb9e0107deeb7d</bitcoind.md5>
-                <bitcoind.sha1>a02469a77781cd1413df120133be131bd388a997</bitcoind.sha1>
+                <bitcoind.url>https://s3-us-west-1.amazonaws.com/suredbits.com/bitcoin-core-0.20.99/bitcoin-0.20.99-osx64.tar.gz</bitcoind.url>
+                <bitcoind.md5>11f59ac8332ef8696f4187a8a5c65bf2</bitcoind.md5>
+                <bitcoind.sha1>0bc1438170ff2f78e66d04cbb41c213092093f13</bitcoind.sha1>
             </properties>
         </profile>
         <profile>
@@ -275,9 +275,24 @@
             <scope>test</scope>
         </dependency>
         <dependency>
-            <groupId>com.opentable.components</groupId>
-            <artifactId>otj-pg-embedded</artifactId>
-            <version>0.13.3</version>
+            <groupId>org.bitcoin-s</groupId>
+            <artifactId>bitcoin-s-core_${scala.version.short}</artifactId>
+            <version>${bitcoin-s.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bitcoin-s</groupId>
+            <artifactId>bitcoin-s-wallet_${scala.version.short}</artifactId>
+            <version>${bitcoin-s.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bitcoin-s</groupId>
+            <artifactId>bitcoin-s-node_${scala.version.short}</artifactId>
+            <version>${bitcoin-s.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bitcoin-s</groupId>
+            <artifactId>bitcoin-s-testkit_${scala.version.short}</artifactId>
+            <version>${bitcoin-s.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>

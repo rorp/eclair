@@ -16,7 +16,7 @@
 
 package fr.acinq.eclair.blockchain
 
-import fr.acinq.bitcoin.{Block, Transaction}
+import fr.acinq.bitcoin.{Block, BlockHeader, Transaction}
 import fr.acinq.eclair.blockchain.fee.FeeratesPerKw
 
 /**
@@ -26,6 +26,8 @@ import fr.acinq.eclair.blockchain.fee.FeeratesPerKw
 trait BlockchainEvent
 
 case class NewBlock(block: Block) extends BlockchainEvent
+
+case class NewBlockHeader(blockHeader: BlockHeader) extends BlockchainEvent
 
 case class NewTransaction(tx: Transaction) extends BlockchainEvent
 
