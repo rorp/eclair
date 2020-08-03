@@ -281,6 +281,11 @@
         </dependency>
         <dependency>
             <groupId>org.bitcoin-s</groupId>
+            <artifactId>bitcoin-s-fee-provider_${scala.version.short}</artifactId>
+            <version>${bitcoin-s.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>org.bitcoin-s</groupId>
             <artifactId>bitcoin-s-wallet_${scala.version.short}</artifactId>
             <version>${bitcoin-s.version}</version>
         </dependency>

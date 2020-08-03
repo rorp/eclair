@@ -72,7 +72,7 @@
         <bitcoinlib.version>0.18</bitcoinlib.version>
         <guava.version>24.0-android</guava.version>
         <kamon.version>2.1.0</kamon.version>
-        <bitcoin-s.version>0.0.0+49-3a1f3d34-SNAPSHOT</bitcoin-s.version>
+        <bitcoin-s.version>0.3.0+311-eeb84647+20200803-1202-SNAPSHOT</bitcoin-s.version>
     </properties>
 
     <build>

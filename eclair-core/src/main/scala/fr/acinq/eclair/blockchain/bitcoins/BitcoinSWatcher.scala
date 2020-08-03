@@ -67,9 +67,9 @@ class BitcoinSWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
 
     case TickNewBlock =>
       val publishedEvent = for {
-        blockHash <- wallet.chainQueryApi.getBestBlockHash()
-        countOpt <- wallet.chainQueryApi.getBlockHeight(blockHash)
-        count = countOpt.get.toInt
+        blockHash <- wallet.getBestBlockHash()
+        countOpt <- wallet.getBlockHeight(blockHash)
+        count = countOpt.get
       } yield {
         log.debug("setting blockCount={}", count)
         blockCount.set(count)

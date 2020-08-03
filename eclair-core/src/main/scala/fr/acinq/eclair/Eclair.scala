@@ -27,6 +27,7 @@ import fr.acinq.eclair.TimestampQueryFilters._
 import fr.acinq.eclair.blockchain.OnChainBalance
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.WalletTransaction
+import fr.acinq.eclair.blockchain.bitcoins.BitcoinSWallet
 import fr.acinq.eclair.channel.Register.{Forward, ForwardShortId}
 import fr.acinq.eclair.channel._
 import fr.acinq.eclair.db.{IncomingPayment, NetworkFee, OutgoingPayment, Stats}
@@ -38,7 +39,7 @@ import fr.acinq.eclair.payment.relay.Relayer.{GetOutgoingChannels, OutgoingChann
 import fr.acinq.eclair.payment.send.PaymentInitiator.{SendPaymentRequest, SendPaymentToRouteRequest, SendPaymentToRouteResponse}
 import fr.acinq.eclair.router.Router._
 import fr.acinq.eclair.router.{NetworkStats, RouteCalculation}
-import fr.acinq.eclair.wire.{ChannelAnnouncement, ChannelUpdate, NodeAddress, NodeAnnouncement, GenericTlv}
+import fr.acinq.eclair.wire.{ChannelAnnouncement, ChannelUpdate, GenericTlv, NodeAddress, NodeAnnouncement}
 import scodec.bits.ByteVector
 
 import scala.concurrent.duration._
@@ -225,6 +226,7 @@ class EclairImpl(appKit: Kit) extends Eclair {
   override def newAddress(): Future[String] = {
     appKit.wallet match {
       case w: BitcoinCoreWallet => w.getReceiveAddress
+      case w: BitcoinSWallet => w.getReceiveAddress
       case _ => Future.failed(new IllegalArgumentException("this call is only available with a bitcoin core backend"))
     }
   }
@@ -232,6 +234,7 @@ class EclairImpl(appKit: Kit) extends Eclair {
   override def onChainBalance(): Future[OnChainBalance] = {
     appKit.wallet match {
       case w: BitcoinCoreWallet => w.getBalance
+      case w: BitcoinSWallet => w.getBalance
       case _ => Future.failed(new IllegalArgumentException("this call is only available with a bitcoin core backend"))
     }
   }
@@ -239,6 +242,7 @@ class EclairImpl(appKit: Kit) extends Eclair {
   override def onChainTransactions(count: Int, skip: Int): Future[Iterable[WalletTransaction]] = {
     appKit.wallet match {
       case w: BitcoinCoreWallet => w.listTransactions(count, skip)
+      case w: BitcoinSWallet => w.listTransactions(count, skip)
       case _ => Future.failed(new IllegalArgumentException("this call is only available with a bitcoin core backend"))
     }
   }
@@ -246,6 +250,7 @@ class EclairImpl(appKit: Kit) extends Eclair {
   override def sendOnChain(address: String, amount: Satoshi, confirmationTarget: Long): Future[ByteVector32] = {
     appKit.wallet match {
       case w: BitcoinCoreWallet => w.sendToAddress(address, amount, confirmationTarget)
+      case w: BitcoinSWallet => w.sendToAddress(address, amount, confirmationTarget)
       case _ => Future.failed(new IllegalArgumentException("this call is only available with a bitcoin core backend"))
     }
   }
