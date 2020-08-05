@@ -167,10 +167,16 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     wallet.getNewAddress().map(_.value)
   }
 
-  override def getReceivePubkey(receiveAddress: Option[String]): Future[PublicKey] = Future {
-    val xpub = wallet.keyManager.deriveXPub(walletConf.defaultAccount).get
-    PublicKey(ByteVector.fromValidHex(xpub.key.hex))
-  }
+  override def getReceivePubkey(receiveAddress: Option[String] = None): Future[PublicKey] =
+    for {
+      addressStr <- receiveAddress.map(Future.successful).getOrElse(getReceiveAddress)
+      address = BitcoinAddress.fromString(addressStr)
+      addressInfo <- wallet.getAddressInfo(address)
+    } yield {
+      addressInfo
+        .map(info => PublicKey(info.pubkey.bytes))
+        .getOrElse(throw new RuntimeException(s"cannot get receive pubkey: unknown address $address"))
+    }
 
   override def makeFundingTx(pubkeyScript: ByteVector,
                              amount: Satoshi,

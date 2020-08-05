@@ -1,5 +1,6 @@
 package fr.acinq.eclair.blockchain.bitcoins
 
+import java.io.{PrintWriter, StringWriter}
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
@@ -29,18 +30,11 @@ class BitcoinSWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
 
   def uninitialized(): Receive = {
     case wallet: BitcoinSWallet =>
+      context.system.eventStream.subscribe(self, classOf[BlockchainEvent])
       // this is to initialize block count
       self ! TickNewBlock
-      context become watching(wallet, Set(), Map(), SortedMap(), None)
-//      context become stopped(wallet)
+      context.become(watching(wallet, Set(), Map(), SortedMap(), None))
   }
-
-//  def stopped(wallet: Wallet): Receive = {
-//    case walletStarted: WalletStarted
-//    // this is to initialize block count
-//    self ! TickNewBlock
-//    context become watching(wallet, Set(), Map(), SortedMap(), None)
-//  }
 
   def watching(wallet: BitcoinSWallet, watches: Set[Watch], watchedUtxos: Map[OutPoint, Set[Watch]], block2tx: SortedMap[Long, Seq[Transaction]], nextTick: Option[Cancellable]): Receive = {
     case NewTransaction(tx) =>
@@ -69,14 +63,22 @@ class BitcoinSWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
       val publishedEvent = for {
         blockHash <- wallet.getBestBlockHash()
         countOpt <- wallet.getBlockHeight(blockHash)
-        count = countOpt.get
       } yield {
-        log.debug("setting blockCount={}", count)
-        blockCount.set(count)
-        context.system.eventStream.publish(CurrentBlockCount(count))
+        countOpt match {
+          case Some(count) =>
+            log.info(s"setting blockCount=${count}")
+            blockCount.set(count)
+            context.system.eventStream.publish(CurrentBlockCount(count))
+          case None =>
+            log.error(s"Unknown block height ${blockHash}")
+        }
       }
       publishedEvent.failed.foreach { ex =>
-          log.error("Cannot publish current block count", ex)
+        val w = new StringWriter()
+        ex.printStackTrace(new PrintWriter(w))
+        w.flush()
+        val msg = s"Cannot publish current block count ${ex} ${w.toString}"
+        log.error(msg)
       }
 
       val updatedBalance = for {
