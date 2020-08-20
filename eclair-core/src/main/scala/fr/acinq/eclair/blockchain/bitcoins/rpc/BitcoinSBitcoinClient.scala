@@ -18,8 +18,9 @@ package fr.acinq.eclair.blockchain.bitcoins.rpc
 
 import fr.acinq.bitcoin._
 import fr.acinq.eclair.blockchain.bitcoind.rpc.{BitcoinJsonRPCClient, ExtendedBitcoinClient}
-import org.bitcoins.core.api.ChainQueryApi.FilterResponse
-import org.bitcoins.core.api.{ChainQueryApi, NodeApi}
+import org.bitcoins.core.api.chain.ChainQueryApi
+import org.bitcoins.core.api.chain.ChainQueryApi.FilterResponse
+import org.bitcoins.core.api.node.NodeApi
 import org.bitcoins.core.gcs.{BlockFilter, FilterType, GolombFilter}
 import org.bitcoins.core.protocol.blockchain.Block
 import org.bitcoins.core.protocol.{BitcoinAddress, BlockStamp}

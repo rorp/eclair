@@ -64,3 +64,14 @@ trait EclairWallet {
 final case class OnChainBalance(confirmed: Satoshi, unconfirmed: Satoshi)
 
 final case class MakeFundingTxResponse(fundingTx: Transaction, fundingTxOutputIndex: Int, fee: Satoshi)
+
+object EclairWallet {
+
+  trait Neutrino { this: EclairWallet =>
+    /**
+     * Requests the underlying Neutrino wallet to watch the given public key script.
+     */
+    def watchPubKeyScript(pubkeyScript: ByteVector): Future[Unit]
+  }
+
+}

@@ -23,6 +23,7 @@ import fr.acinq.bitcoin.Crypto.{PrivateKey, PublicKey}
 import fr.acinq.bitcoin.{ByteVector32, OutPoint, Satoshi, Script, ScriptFlags, Transaction}
 import fr.acinq.eclair.Logs.LogCategory
 import fr.acinq.eclair._
+import fr.acinq.eclair.blockchain.EclairWallet.Neutrino
 import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.channel.Helpers.{Closing, Funding}
 import fr.acinq.eclair.channel.Monitoring.{Metrics, Tags}
@@ -328,6 +329,15 @@ class Channel(val nodeParams: NodeParams, val wallet: EclairWallet, remoteNodeId
             htlcBasepoint = open.htlcBasepoint,
             features = remoteInit.features)
           log.debug("remote params: {}", remoteParams)
+          wallet match {
+            case neutrino: Neutrino =>
+              val fundingPubkeyScript = Script.write(Script.pay2wsh(Scripts.multiSig2of2(remoteParams.fundingPubKey, fundingPubkey)))
+              neutrino
+                .watchPubKeyScript(fundingPubkeyScript)
+                .failed
+                .foreach(ex => log.error("cannot start watching the funding transaction", ex))
+            case _ => ()
+          }
           goto(WAIT_FOR_FUNDING_CREATED) using DATA_WAIT_FOR_FUNDING_CREATED(open.temporaryChannelId, localParams, remoteParams, open.fundingSatoshis, open.pushMsat, open.feeratePerKw, open.firstPerCommitmentPoint, open.channelFlags, channelVersion, accept) sending accept
       }
 

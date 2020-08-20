@@ -231,6 +231,8 @@ class BitcoinSWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
             case (height, index) => self ! TriggerEvent(w, WatchEventConfirmed(w.event, height, index, tx))
           }
         }
+      case _ =>
+        Future.unit
     }
   }
 
