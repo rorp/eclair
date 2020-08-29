@@ -12,6 +12,7 @@ import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.WalletTransaction
 import fr.acinq.eclair.blockchain.bitcoind.rpc._
 import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
+import fr.acinq.eclair.blockchain.fee.FeeratePerKw
 import fr.acinq.eclair.wire.ChannelAnnouncement
 import grizzled.slf4j.Logging
 import org.bitcoins.chain.blockchain.ChainHandler
@@ -185,13 +186,11 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
         .getOrElse(throw new RuntimeException(s"cannot get receive pubkey: unknown address $address"))
     }
 
-  override def makeFundingTx(pubkeyScript: ByteVector,
-                             amount: Satoshi,
-                             feeRatePerKw: Long): Future[MakeFundingTxResponse] = {
+  override def makeFundingTx(pubkeyScript: ByteVector, amount: Satoshi, feeRatePerKw: FeeratePerKw): Future[MakeFundingTxResponse] = {
     val spk = ScriptPubKey.fromAsmBytes(pubkeyScript)
     val sats = Satoshis(amount.toLong)
     val output = Vector(TransactionOutput(sats, spk))
-    val feeRate = SatoshisPerKW(Satoshis(feeRatePerKw))
+    val feeRate = SatoshisPerKW(Satoshis(feeRatePerKw.feerate.toLong))
 
     val fundedTxF = wallet.sendToOutputs(output, feeRate)
 

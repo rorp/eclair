@@ -27,6 +27,7 @@ import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.blockchain.bitcoind.BitcoindService
 import fr.acinq.eclair.blockchain.bitcoind.rpc.{BasicBitcoinJsonRPCClient, JsonRPCError}
 import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
+import fr.acinq.eclair.blockchain.fee.FeeratePerKw
 import fr.acinq.eclair.transactions.Scripts
 import fr.acinq.eclair.{LongToBtcAmount, TestKitBaseClass, addressToPublicKeyScript, randomKey}
 import grizzled.slf4j.Logging
@@ -108,7 +109,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
 
     val fundingTxs = for (_ <- 0 to 3) yield {
       val pubkeyScript = Script.write(Script.pay2wsh(Scripts.multiSig2of2(randomKey.publicKey, randomKey.publicKey)))
-      wallet.makeFundingTx(pubkeyScript, MilliBtc(50), 200).pipeTo(sender.ref) // create a tx with an invalid feerate (too little)
+      wallet.makeFundingTx(pubkeyScript, MilliBtc(50), FeeratePerKw(200 sat)).pipeTo(sender.ref) // create a tx with an invalid feerate (too little)
       val belowFeeFundingTx = sender.expectMsgType[MakeFundingTxResponse].fundingTx
       wallet.publishTransaction(belowFeeFundingTx).pipeTo(sender.ref) // try publishing the tx
       assert(sender.expectMsgType[Failure].cause.asInstanceOf[JsonRPCError].error.message.contains("min relay fee not met"))
@@ -117,7 +118,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
 
       // now fund a tx with correct feerate
       // fixme needed to change fee rate from 250 -> 251 because we round down fee rate vs core rounding up
-      wallet.makeFundingTx(pubkeyScript, MilliBtc(50), 251).pipeTo(sender.ref)
+      wallet.makeFundingTx(pubkeyScript, MilliBtc(50), FeeratePerKw(251 sat)).pipeTo(sender.ref)
       sender.expectMsgType[MakeFundingTxResponse].fundingTx
     }
 
@@ -167,7 +168,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     assert(sender.expectMsgType[Vector[SpendingInfoDb]](10 seconds).size === 0)
 
     val pubkeyScript = Script.write(Script.pay2wsh(Scripts.multiSig2of2(randomKey.publicKey, randomKey.publicKey)))
-    wallet.makeFundingTx(pubkeyScript, MilliBtc(50), 10000).pipeTo(sender.ref)
+    wallet.makeFundingTx(pubkeyScript, MilliBtc(50), FeeratePerKw(10000 sat)).pipeTo(sender.ref)
     val fundingTx = sender.expectMsgType[MakeFundingTxResponse].fundingTx
 
     wallet.listReservedUtxos.pipeTo(sender.ref)

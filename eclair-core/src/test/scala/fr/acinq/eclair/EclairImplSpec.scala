@@ -24,6 +24,7 @@ import fr.acinq.bitcoin.Crypto.{PrivateKey, PublicKey}
 import fr.acinq.bitcoin.{Block, ByteVector32, ByteVector64, Crypto}
 import fr.acinq.eclair.TestConstants._
 import fr.acinq.eclair.blockchain.TestWallet
+import fr.acinq.eclair.blockchain.fee.{FeeratePerByte, FeeratePerKw}
 import fr.acinq.eclair.channel.{CMD_FORCECLOSE, Register, _}
 import fr.acinq.eclair.db._
 import fr.acinq.eclair.io.Peer.OpenChannel
@@ -84,14 +85,14 @@ class EclairImplSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with I
     val nodeId = PublicKey(hex"030bb6a5e0c6b203c7e2180fb78c7ba4bdce46126761d8201b91ddac089cdecc87")
 
     // standard conversion
-    eclair.open(nodeId, fundingAmount = 10000000L sat, pushAmount_opt = None, fundingFeerateSatByte_opt = Some(5), flags_opt = None, openTimeout_opt = None)
+    eclair.open(nodeId, fundingAmount = 10000000L sat, pushAmount_opt = None, fundingFeeratePerByte_opt = Some(FeeratePerByte(5 sat)), flags_opt = None, openTimeout_opt = None)
     val open = switchboard.expectMsgType[OpenChannel]
-    assert(open.fundingTxFeeratePerKw_opt === Some(1250))
+    assert(open.fundingTxFeeratePerKw_opt === Some(FeeratePerKw(1250 sat)))
 
     // check that minimum fee rate of 253 sat/bw is used
-    eclair.open(nodeId, fundingAmount = 10000000L sat, pushAmount_opt = None, fundingFeerateSatByte_opt = Some(1), flags_opt = None, openTimeout_opt = None)
+    eclair.open(nodeId, fundingAmount = 10000000L sat, pushAmount_opt = None, fundingFeeratePerByte_opt = Some(FeeratePerByte(1 sat)), flags_opt = None, openTimeout_opt = None)
     val open1 = switchboard.expectMsgType[OpenChannel]
-    assert(open1.fundingTxFeeratePerKw_opt === Some(MinimumFeeratePerKw))
+    assert(open1.fundingTxFeeratePerKw_opt === Some(FeeratePerKw.MinimumFeeratePerKw))
   }
 
   test("call send with passing correct arguments") { f =>
@@ -429,4 +430,61 @@ class EclairImplSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with I
     assert(expectedPaymentPreimage === ByteVector32(keySendTlv.value))
   }
 
+  test("sign & verify an arbitrary message with the node's private key") { f =>
+    import f._
+
+    val eclair = new EclairImpl(kit)
+
+    val base64Msg = "aGVsbG8sIHdvcmxk" // echo -n 'hello, world' | base64
+    val bytesMsg = ByteVector.fromValidBase64(base64Msg)
+
+    val signedMessage: SignedMessage = eclair.signMessage(bytesMsg)
+    assert(signedMessage.nodeId === kit.nodeParams.nodeId)
+    assert(signedMessage.message === base64Msg)
+
+    val verifiedMessage: VerifiedMessage = eclair.verifyMessage(bytesMsg, signedMessage.signature)
+    assert(verifiedMessage.valid)
+    assert(verifiedMessage.publicKey === kit.nodeParams.nodeId)
+
+    val prefix = ByteVector("Lightning Signed Message:".getBytes)
+    val dhash256 = Crypto.hash256(prefix ++ bytesMsg)
+    val expectedDigest = ByteVector32(hex"cbedbc1542fb139e2e10954f1ff9f82e8a1031cc63260636bbc45a90114552ea")
+    assert(dhash256 === expectedDigest)
+    assert(Crypto.verifySignature(dhash256, ByteVector64(signedMessage.signature.tail), kit.nodeParams.nodeId))
+  }
+
+  test("verify an invalid signature for the given message") { f =>
+    import f._
+
+    val eclair = new EclairImpl(kit)
+
+    val base64Msg = "aGVsbG8sIHdvcmxk" // echo -n 'hello, world' | base64
+    val bytesMsg = ByteVector.fromValidBase64(base64Msg)
+
+    val signedMessage: SignedMessage = eclair.signMessage(bytesMsg)
+    assert(signedMessage.nodeId === kit.nodeParams.nodeId)
+    assert(signedMessage.message === base64Msg)
+
+    val wrongMsg = ByteVector.fromValidBase64(base64Msg.tail)
+    val verifiedMessage: VerifiedMessage = eclair.verifyMessage(wrongMsg, signedMessage.signature)
+    assert(verifiedMessage.valid)
+    assert(verifiedMessage.publicKey !== kit.nodeParams.nodeId)
+  }
+
+  test("ensure that an invalid recoveryId cause the signature verification to fail") { f =>
+    import f._
+
+    val eclair = new EclairImpl(kit)
+
+    val base64Msg = "aGVsbG8sIHdvcmxk" // echo -n 'hello, world' | base64
+    val bytesMsg = ByteVector.fromValidBase64(base64Msg)
+
+    val signedMessage: SignedMessage = eclair.signMessage(bytesMsg)
+    assert(signedMessage.nodeId === kit.nodeParams.nodeId)
+    assert(signedMessage.message === base64Msg)
+
+    val invalidSignature = (if (signedMessage.signature.head.toInt == 31) 32 else 31).toByte +: signedMessage.signature.tail
+    val verifiedMessage: VerifiedMessage = eclair.verifyMessage(bytesMsg, invalidSignature)
+    assert(verifiedMessage.publicKey !== kit.nodeParams.nodeId)
+  }
 }

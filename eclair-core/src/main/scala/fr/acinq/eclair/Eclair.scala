@@ -16,18 +16,20 @@
 
 package fr.acinq.eclair
 
+import java.nio.charset.StandardCharsets
 import java.util.UUID
 
 import akka.actor.ActorRef
 import akka.pattern._
 import akka.util.Timeout
 import fr.acinq.bitcoin.Crypto.PublicKey
-import fr.acinq.bitcoin.{ByteVector32, Crypto, Satoshi}
+import fr.acinq.bitcoin.{ByteVector32, ByteVector64, Crypto, Satoshi}
 import fr.acinq.eclair.TimestampQueryFilters._
 import fr.acinq.eclair.blockchain.OnChainBalance
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.WalletTransaction
 import fr.acinq.eclair.blockchain.bitcoins.BitcoinSWallet
+import fr.acinq.eclair.blockchain.fee.{FeeratePerByte, FeeratePerKw}
 import fr.acinq.eclair.channel.Register.{Forward, ForwardShortId}
 import fr.acinq.eclair.channel._
 import fr.acinq.eclair.db.{IncomingPayment, NetworkFee, OutgoingPayment, Stats}
@@ -39,7 +41,7 @@ import fr.acinq.eclair.payment.relay.Relayer.{GetOutgoingChannels, OutgoingChann
 import fr.acinq.eclair.payment.send.PaymentInitiator.{SendPaymentRequest, SendPaymentToRouteRequest, SendPaymentToRouteResponse}
 import fr.acinq.eclair.router.Router._
 import fr.acinq.eclair.router.{NetworkStats, RouteCalculation}
-import fr.acinq.eclair.wire.{ChannelAnnouncement, ChannelUpdate, GenericTlv, NodeAddress, NodeAnnouncement}
+import fr.acinq.eclair.wire._
 import scodec.bits.ByteVector
 
 import scala.concurrent.duration._
@@ -51,6 +53,10 @@ case class GetInfoResponse(version: String, nodeId: PublicKey, alias: String, co
 case class AuditResponse(sent: Seq[PaymentSent], received: Seq[PaymentReceived], relayed: Seq[PaymentRelayed])
 
 case class TimestampQueryFilters(from: Long, to: Long)
+
+case class SignedMessage(nodeId: PublicKey, message: String, signature: ByteVector)
+
+case class VerifiedMessage(valid: Boolean, publicKey: PublicKey)
 
 object TimestampQueryFilters {
   /** We use this in the context of timestamp filtering, when we don't need an upper bound. */
@@ -65,6 +71,11 @@ object TimestampQueryFilters {
   }
 }
 
+object SignedMessage {
+  def signedBytes(message: ByteVector): ByteVector32 =
+    Crypto.hash256(ByteVector("Lightning Signed Message:".getBytes(StandardCharsets.UTF_8)) ++ message)
+}
+
 object ApiTypes {
   type ChannelIdentifier = Either[ByteVector32, ShortChannelId]
 }
@@ -75,7 +86,7 @@ trait Eclair {
 
   def disconnect(nodeId: PublicKey)(implicit timeout: Timeout): Future[String]
 
-  def open(nodeId: PublicKey, fundingAmount: Satoshi, pushAmount_opt: Option[MilliSatoshi], fundingFeerateSatByte_opt: Option[Long], flags_opt: Option[Int], openTimeout_opt: Option[Timeout])(implicit timeout: Timeout): Future[ChannelCommandResponse]
+  def open(nodeId: PublicKey, fundingAmount: Satoshi, pushAmount_opt: Option[MilliSatoshi], fundingFeeratePerByte_opt: Option[FeeratePerByte], flags_opt: Option[Int], openTimeout_opt: Option[Timeout])(implicit timeout: Timeout): Future[ChannelCommandResponse]
 
   def close(channels: List[ApiTypes.ChannelIdentifier], scriptPubKey_opt: Option[ByteVector])(implicit timeout: Timeout): Future[Map[ApiTypes.ChannelIdentifier, Either[Throwable, ChannelCommandResponse]]]
 
@@ -135,6 +146,9 @@ trait Eclair {
 
   def onChainTransactions(count: Int, skip: Int): Future[Iterable[WalletTransaction]]
 
+  def signMessage(message: ByteVector): SignedMessage
+
+  def verifyMessage(message: ByteVector, recoverableSignature: ByteVector): VerifiedMessage
 }
 
 class EclairImpl(appKit: Kit) extends Eclair {
@@ -153,14 +167,14 @@ class EclairImpl(appKit: Kit) extends Eclair {
     (appKit.switchboard ? Peer.Disconnect(nodeId)).mapTo[String]
   }
 
-  override def open(nodeId: PublicKey, fundingAmount: Satoshi, pushAmount_opt: Option[MilliSatoshi], fundingFeerateSatByte_opt: Option[Long], flags_opt: Option[Int], openTimeout_opt: Option[Timeout])(implicit timeout: Timeout): Future[ChannelCommandResponse] = {
+  override def open(nodeId: PublicKey, fundingAmount: Satoshi, pushAmount_opt: Option[MilliSatoshi], fundingFeeratePerByte_opt: Option[FeeratePerByte], flags_opt: Option[Int], openTimeout_opt: Option[Timeout])(implicit timeout: Timeout): Future[ChannelCommandResponse] = {
     // we want the open timeout to expire *before* the default ask timeout, otherwise user won't get a generic response
     val openTimeout = openTimeout_opt.getOrElse(Timeout(10 seconds))
     (appKit.switchboard ? Peer.OpenChannel(
       remoteNodeId = nodeId,
       fundingSatoshis = fundingAmount,
       pushMsat = pushAmount_opt.getOrElse(0 msat),
-      fundingTxFeeratePerKw_opt = fundingFeerateSatByte_opt.map(feerateByte2Kw),
+      fundingTxFeeratePerKw_opt = fundingFeeratePerByte_opt.map(FeeratePerKw(_)),
       channelFlags = flags_opt.map(_.toByte),
       timeout_opt = Some(openTimeout))).mapTo[ChannelCommandResponse]
   }
@@ -397,5 +411,19 @@ class EclairImpl(appKit: Kit) extends Eclair {
     val keySendTlvRecords = Seq(GenericTlv(UInt64(5482373484L), paymentPreimage))
     val sendPayment = SendPaymentRequest(amount, paymentHash, recipientNodeId, maxAttempts, externalId = externalId_opt, routeParams = Some(routeParams), userCustomTlvs = keySendTlvRecords)
     (appKit.paymentInitiator ? sendPayment).mapTo[UUID]
+  }
+
+  override def signMessage(message: ByteVector): SignedMessage = {
+    val bytesToSign = SignedMessage.signedBytes(message)
+    val (signature, recoveryId) = appKit.nodeParams.keyManager.signDigest(bytesToSign)
+    SignedMessage(appKit.nodeParams.nodeId, message.toBase64, (recoveryId + 31).toByte +: signature)
+  }
+
+  override def verifyMessage(message: ByteVector, recoverableSignature: ByteVector): VerifiedMessage = {
+    val signedBytes = SignedMessage.signedBytes(message)
+    val signature = ByteVector64(recoverableSignature.tail)
+    val recoveryId = recoverableSignature.head.toInt - 31
+    val pubKeyFromSignature = Crypto.recoverPublicKey(signature, signedBytes, recoveryId)
+    VerifiedMessage(true, pubKeyFromSignature)
   }
 }
