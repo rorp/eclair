@@ -21,27 +21,21 @@ import java.nio.file.Path
 import akka.pattern.pipe
 import akka.testkit.TestProbe
 import com.typesafe.config.{Config, ConfigFactory}
-import fr.acinq.bitcoin.{Block, Btc, Satoshi, Transaction, TxOut}
-import fr.acinq.eclair.blockchain.MakeFundingTxResponse
-import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.{FundTransactionResponse, SignTransactionResponse}
-import fr.acinq.eclair.blockchain.bitcoind.BitcoindService.BitcoinReq
+import fr.acinq.bitcoin.Satoshi
+import fr.acinq.eclair.blockchain.bitcoind.BitcoindService
 import fr.acinq.eclair.blockchain.bitcoind.rpc.BasicBitcoinJsonRPCClient
-import fr.acinq.eclair.blockchain.bitcoind.{BitcoinCoreWallet, BitcoindService}
 import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
 import fr.acinq.eclair.{LongToBtcAmount, TestKitBaseClass}
 import grizzled.slf4j.Logging
 import org.bitcoins.core.protocol.BitcoinAddress
 import org.bitcoins.crypto.DoubleSha256DigestBE
 import org.bitcoins.testkit.BitcoinSTestAppConfig
-import org.bitcoins.wallet.models.SpendingInfoDb
-import org.json4s.JsonAST.{JDecimal, JString}
-import org.json4s.{DefaultFormats, JValue}
+import org.json4s.DefaultFormats
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuiteLike
 
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration._
-import scala.concurrent.{Await, Future}
+import scala.concurrent.Future
 import scala.jdk.CollectionConverters._
 
 

@@ -8,17 +8,19 @@ import com.typesafe.config.{Config, ConfigFactory}
 import fr.acinq.bitcoin.Crypto.PublicKey
 import fr.acinq.bitcoin.{ByteVector32, Satoshi, Transaction}
 import fr.acinq.eclair.blockchain.EclairWallet.Neutrino
+import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.WalletTransaction
 import fr.acinq.eclair.blockchain.bitcoind.rpc._
 import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
-import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.wire.ChannelAnnouncement
 import grizzled.slf4j.Logging
 import org.bitcoins.chain.blockchain.ChainHandler
 import org.bitcoins.chain.config.ChainAppConfig
 import org.bitcoins.chain.models._
 import org.bitcoins.chain.pow.Pow
+import org.bitcoins.core.api.chain.db.{BlockHeaderDb, BlockHeaderDbHelper}
 import org.bitcoins.core.api.node.NodeApi
+import org.bitcoins.core.api.wallet.db.SpendingInfoDb
 import org.bitcoins.core.config.RegTest
 import org.bitcoins.core.currency.Satoshis
 import org.bitcoins.core.hd.AddressType
@@ -32,12 +34,12 @@ import org.bitcoins.core.wallet.utxo.TxoState
 import org.bitcoins.crypto.DoubleSha256DigestBE
 import org.bitcoins.feeprovider.BitcoinerLiveFeeRateProvider
 import org.bitcoins.keymanager.bip39.{BIP39KeyManager, BIP39LockedKeyManager}
+import org.bitcoins.node._
 import org.bitcoins.node.config.NodeAppConfig
 import org.bitcoins.node.models.Peer
-import org.bitcoins.node.{OnTxReceived, _}
-import org.bitcoins.wallet.{OnTransactionProcessed, Wallet, WalletCallbacks}
 import org.bitcoins.wallet.config.WalletAppConfig
-import org.bitcoins.wallet.models.{AccountDAO, SpendingInfoDb}
+import org.bitcoins.wallet.models.AccountDAO
+import org.bitcoins.wallet.{OnTransactionProcessed, Wallet, WalletCallbacks}
 import scodec.bits.ByteVector
 
 import scala.concurrent.duration._
@@ -53,7 +55,7 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
   import system.dispatcher
 
   require(walletConf.defaultAddressType != AddressType.Legacy, "Must use segwit for LN")
-  require(nodeConf.isNeutrinoEnabled, "Must use Neutrino for LN")
+  require(nodeConf.nodeType == NodeType.NeutrinoNode, "Must use Neutrino for LN")
 
   def nodeApi: NodeApi = wallet.nodeApi
 
@@ -112,6 +114,7 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     _ <- wallet.start()
     _ = watcher.foreach(_ ! this)
     _ <- node.sync()
+//    _ <- wallet.rescanNeutrinoWallet(startOpt = None, endOpt = None, addressBatchSize = 20, useCreationTime = true)
   } yield {
     sys.addShutdownHook {
       wallet.stop()
@@ -430,9 +433,9 @@ object BitcoinSWallet {
     }
 
     for {
-      _ <- chainConf.initialize()
-      _ <- walletConf.initialize()
-      _ <- nodeConf.initialize()
+      _ <- chainConf.start()
+      _ <- walletConf.start()
+      _ <- nodeConf.start()
       wallet <- new BitcoinSWallet(extendedBitcoinClient, watcher).start()
     } yield wallet
   }

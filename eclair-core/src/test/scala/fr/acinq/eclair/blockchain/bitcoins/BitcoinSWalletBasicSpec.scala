@@ -30,10 +30,10 @@ import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
 import fr.acinq.eclair.transactions.Scripts
 import fr.acinq.eclair.{LongToBtcAmount, TestKitBaseClass, addressToPublicKeyScript, randomKey}
 import grizzled.slf4j.Logging
+import org.bitcoins.core.api.wallet.db.SpendingInfoDb
 import org.bitcoins.core.protocol.BitcoinAddress
 import org.bitcoins.crypto.DoubleSha256DigestBE
 import org.bitcoins.testkit.BitcoinSTestAppConfig
-import org.bitcoins.wallet.models.SpendingInfoDb
 import org.json4s.DefaultFormats
 import org.json4s.JsonAST._
 import org.scalatest.BeforeAndAfterAll
