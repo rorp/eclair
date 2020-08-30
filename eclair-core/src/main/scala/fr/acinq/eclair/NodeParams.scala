@@ -102,7 +102,7 @@ object NodeParams {
 
   object ELECTRUM extends WatcherType
 
-  object BITCOIN_S extends WatcherType
+  object NEUTRINO extends WatcherType
 
   /**
    * Order of precedence for the configuration parameters:
@@ -167,7 +167,7 @@ object NodeParams {
 
     val watcherType = config.getString("watcher-type") match {
       case "electrum" => ELECTRUM
-      case "bitcoin-s" => BITCOIN_S
+      case "neutrino" => NEUTRINO
       case _ => BITCOIND
     }
 

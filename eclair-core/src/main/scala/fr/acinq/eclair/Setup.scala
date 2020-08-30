@@ -29,12 +29,11 @@ import akka.pattern.after
 import akka.util.Timeout
 import com.softwaremill.sttp.okhttp.OkHttpFutureBackend
 import fr.acinq.bitcoin.{Block, ByteVector32, Satoshi}
-import fr.acinq.eclair.NodeParams.{BITCOIND, BITCOIN_S, ELECTRUM}
+import fr.acinq.eclair.NodeParams.{BITCOIND, ELECTRUM, NEUTRINO}
 import fr.acinq.eclair.blockchain.bitcoind.rpc.{BasicBitcoinJsonRPCClient, BatchingBitcoinJsonRPCClient, ExtendedBitcoinClient}
 import fr.acinq.eclair.blockchain.bitcoind.zmq.ZMQActor
 import fr.acinq.eclair.blockchain.bitcoind.{BitcoinCoreWallet, ZmqWatcher}
-import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
-import fr.acinq.eclair.blockchain.bitcoins.{BitcoinSWallet, BitcoinSWatcher}
+import fr.acinq.eclair.blockchain.bitcoins.{NeutrinoWallet, NeutrinoWatcher}
 import fr.acinq.eclair.blockchain.electrum.ElectrumClient.SSL
 import fr.acinq.eclair.blockchain.electrum.ElectrumClientPool.ElectrumServerAddress
 import fr.acinq.eclair.blockchain.electrum._
@@ -140,14 +139,8 @@ class Setup(datadir: File,
   logger.info(s"using chain=$chain chainHash=${nodeParams.chainHash}")
 
   val bitcoin = nodeParams.watcherType match {
-    case BITCOIN_S =>
-      val bitcoinClient = new BitcoinSBitcoinClient(
-        new BasicBitcoinJsonRPCClient(
-          user = config.getString("bitcoind.rpcuser"),
-          password = config.getString("bitcoind.rpcpassword"),
-          host = config.getString("bitcoind.host"),
-          port = config.getInt("bitcoind.rpcport")))
-      BitcoinS(bitcoinClient)
+    case NEUTRINO =>
+      Neutrino
     case BITCOIND =>
       val bitcoinClient = new BasicBitcoinJsonRPCClient(
         user = config.getString("bitcoind.rpcuser"),
@@ -271,10 +264,10 @@ class Setup(datadir: File,
           zmqBlockConnected.success(Done)
           zmqTxConnected.success(Done)
           system.actorOf(SimpleSupervisor.props(Props(new ElectrumWatcher(blockCount, electrumClient)), "watcher", SupervisorStrategy.Resume))
-        case BitcoinS(_) =>
+        case Neutrino =>
           zmqBlockConnected.success(Done)
           zmqTxConnected.success(Done)
-          system.actorOf(SimpleSupervisor.props(Props(new BitcoinSWatcher(blockCount)), "watcher", SupervisorStrategy.Resume))
+          system.actorOf(SimpleSupervisor.props(Props(new NeutrinoWatcher(blockCount)), "watcher", SupervisorStrategy.Resume))
       }
 
       router = system.actorOf(SimpleSupervisor.props(Router.props(nodeParams, watcher, Some(routerInitialized)), "router", SupervisorStrategy.Resume))
@@ -282,13 +275,12 @@ class Setup(datadir: File,
       _ <- Future.firstCompletedOf(routerInitialized.future :: routerTimeout :: Nil)
 
       wallet = bitcoin match {
-        case BitcoinS(bitcoinClient) =>
-          val bitcoinSWallet = for {
-            wallet <- BitcoinSWallet
-              .fromDatadir(bitcoinClient, datadir.toPath, Option(watcher))
+        case Neutrino =>
+          val neutrinoWallet = for {
+            wallet <- NeutrinoWallet.fromDatadir(datadir.toPath, Option(watcher))
             started <- wallet.start()
           } yield started
-          Await.result(bitcoinSWallet, Duration.Inf)
+          Await.result(neutrinoWallet, Duration.Inf)
         case Bitcoind(bitcoinClient) => new BitcoinCoreWallet(bitcoinClient)
         case Electrum(electrumClient) =>
           val sqlite = DriverManager.getConnection(s"jdbc:sqlite:${new File(chaindir, "wallet.sqlite")}")
@@ -389,13 +381,9 @@ class Setup(datadir: File,
 
 // @formatter:off
 sealed trait Bitcoin
-
 case class Bitcoind(bitcoinClient: BasicBitcoinJsonRPCClient) extends Bitcoin
-
 case class Electrum(electrumClient: ActorRef) extends Bitcoin
-
-case class BitcoinS(bitcoinClient: BitcoinSBitcoinClient) extends Bitcoin
-
+case object Neutrino extends Bitcoin
 // @formatter:on
 
 case class Kit(nodeParams: NodeParams,

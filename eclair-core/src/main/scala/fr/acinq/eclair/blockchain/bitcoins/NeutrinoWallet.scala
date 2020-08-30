@@ -1,7 +1,7 @@
 package fr.acinq.eclair.blockchain.bitcoins
 
 import java.io.ByteArrayInputStream
-import java.nio.file.{Files, Path, Paths}
+import java.nio.file.{Path, Paths}
 
 import akka.actor.{ActorRef, ActorSystem}
 import com.typesafe.config.{Config, ConfigFactory}
@@ -10,47 +10,39 @@ import fr.acinq.bitcoin.{ByteVector32, Satoshi, Transaction}
 import fr.acinq.eclair.blockchain.EclairWallet.Neutrino
 import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.WalletTransaction
-import fr.acinq.eclair.blockchain.bitcoind.rpc._
-import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
 import fr.acinq.eclair.blockchain.fee.FeeratePerKw
-import fr.acinq.eclair.wire.ChannelAnnouncement
 import grizzled.slf4j.Logging
 import org.bitcoins.chain.blockchain.ChainHandler
 import org.bitcoins.chain.config.ChainAppConfig
 import org.bitcoins.chain.models._
-import org.bitcoins.chain.pow.Pow
-import org.bitcoins.core.api.chain.db.{BlockHeaderDb, BlockHeaderDbHelper}
-import org.bitcoins.core.api.node.NodeApi
+import org.bitcoins.chain.{ChainCallbacks, OnBlockHeaderConnected}
 import org.bitcoins.core.api.wallet.db.SpendingInfoDb
 import org.bitcoins.core.config.RegTest
 import org.bitcoins.core.currency.Satoshis
 import org.bitcoins.core.hd.AddressType
 import org.bitcoins.core.protocol.BitcoinAddress
-import org.bitcoins.core.protocol.blockchain.BlockHeader
 import org.bitcoins.core.protocol.script.ScriptPubKey
 import org.bitcoins.core.protocol.transaction.TransactionOutput
-import org.bitcoins.core.util.{FutureUtil, NetworkUtil}
+import org.bitcoins.core.util.NetworkUtil
 import org.bitcoins.core.wallet.fee._
 import org.bitcoins.core.wallet.utxo.TxoState
 import org.bitcoins.crypto.DoubleSha256DigestBE
 import org.bitcoins.feeprovider.BitcoinerLiveFeeRateProvider
-import org.bitcoins.keymanager.bip39.{BIP39KeyManager, BIP39LockedKeyManager}
 import org.bitcoins.node._
 import org.bitcoins.node.config.NodeAppConfig
 import org.bitcoins.node.models.Peer
 import org.bitcoins.wallet.config.WalletAppConfig
-import org.bitcoins.wallet.models.AccountDAO
-import org.bitcoins.wallet.{OnTransactionProcessed, Wallet, WalletCallbacks}
+import org.bitcoins.wallet.{OnBlockTransactionProcessed, OnTransactionProcessed, Wallet, WalletCallbacks}
 import scodec.bits.ByteVector
 
 import scala.concurrent.duration._
 import scala.concurrent.{Await, ExecutionContext, Future}
 import scala.util.Properties
 
-class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Option[ActorRef], bip39PasswordOpt: Option[String] = None)(implicit system: ActorSystem,
-                                                                                                                                       walletConf: WalletAppConfig,
-                                                                                                                                       nodeConf: NodeAppConfig,
-                                                                                                                                       chainConf: ChainAppConfig) extends EclairWallet with Neutrino with Logging {
+class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String] = None)(implicit system: ActorSystem,
+                                                                                         walletConf: WalletAppConfig,
+                                                                                         nodeConf: NodeAppConfig,
+                                                                                         chainConf: ChainAppConfig) extends EclairWallet with Neutrino with Logging {
   logger.info("Initializing Bitcoin-S wallet")
 
   import system.dispatcher
@@ -58,9 +50,9 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
   require(walletConf.defaultAddressType != AddressType.Legacy, "Must use segwit for LN")
   require(nodeConf.nodeType == NodeType.NeutrinoNode, "Must use Neutrino for LN")
 
-  def nodeApi: NodeApi = wallet.nodeApi
-
   private val chainApiF = for {
+    callbacks <- createChainCallbacks
+    _ = chainConf.addCallbacks(callbacks)
     chainApi <- chainApiFromDb
     isMissingChainWork <- chainApi.isMissingChainWork
     chainApiWithWork <-
@@ -81,12 +73,12 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     NetworkUtil.parseInetSocketAddress(nodeConf.peers.head,
       nodeConf.network.port)
   private val peer = Peer.fromSocket(peerSocket)
-  val uninitializedNodeF = chainApiF.flatMap { _ =>
+  private val uninitializedNodeF = chainApiF.flatMap { _ =>
     nodeConf.createNode(peer)(chainConf, system)
   }
 
   //get our wallet
-  val configuredWalletF: Future[Wallet] = for {
+  private val configuredWalletF: Future[Wallet] = for {
     uninitializedNode <- uninitializedNodeF
     chainApi <- chainApiF
     walletCallbacks <- createWalletCallbacks()
@@ -99,7 +91,7 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     wallet
   }
 
-  val configuredNodeF: Future[Node] = for {
+  private val configuredNodeF: Future[Node] = for {
     uninitializedNode <- uninitializedNodeF
     wallet <- configuredWalletF
     nodeCallbacks <- createNodeCallbacks(wallet)
@@ -108,18 +100,17 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     uninitializedNode
   }
 
-  val startedWalletF: Future[Wallet] = for {
+  private val startedWalletF: Future[Wallet] = for {
     node <- configuredNodeF
     wallet <- configuredWalletF
     _ <- node.start()
     _ <- wallet.start()
     _ = watcher.foreach(_ ! this)
     _ <- node.sync()
-//    _ <- wallet.rescanNeutrinoWallet(startOpt = None, endOpt = None, addressBatchSize = 20, useCreationTime = true)
+    //    _ <- wallet.rescanNeutrinoWallet(startOpt = None, endOpt = None, addressBatchSize = 20, useCreationTime = true)
   } yield {
     sys.addShutdownHook {
       wallet.stop()
-
       for {
         _ <- node.stop()
         _ = logger.info(s"Stopped neutrino node")
@@ -137,10 +128,17 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
   def getBlockHeight(blockHash: DoubleSha256DigestBE): Future[Option[Int]] =
     chainApiFromDb().flatMap(_.getBlockHeight(blockHash))
 
-
   def getBestBlockHash(): Future[DoubleSha256DigestBE] =
     chainApiFromDb().flatMap(_.getBestBlockHash())
 
+  def getBestBlockHeader(): Future[(Int, fr.acinq.bitcoin.BlockHeader)] = {
+    for {
+      chainApi <- chainApiFromDb()
+      headerDb <- chainApi.getBestBlockHeader()
+    } yield {
+      (headerDb.height, toAcinqBlockHeader(headerDb.blockHeader))
+    }
+  }
 
   def listTransactions(count: Int, skip: Int): Future[List[WalletTransaction]] = {
     for {
@@ -157,7 +155,7 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
           timestamp = 0
         )
       }
-      txs.drop(skip).take(count).toList
+      txs.slice(skip, skip + count).toList
     }
   }
 
@@ -203,9 +201,15 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     } yield MakeFundingTxResponse(eclairTx, outputIndex, Satoshi(fee.satoshis.toLong))
   }
 
-  override def watchPubKeyScript(pubkeyScript: ByteVector): Future[Unit] = {
+  override def watchPublicKeyScript(pubkeyScript: ByteVector): Future[Unit] = {
     val spk = ScriptPubKey.fromAsmBytes(pubkeyScript)
-    wallet.watchScriptPubKey(spk).map(_ => ())
+    for {
+      spks <- wallet.listScriptPubKeys()
+      _ <- spks.find(_.scriptPubKey == spk) match {
+        case None => wallet.watchScriptPubKey(spk)
+        case Some(_) => Future.unit
+      }
+    } yield ()
   }
 
   override def commit(tx: Transaction): Future[Boolean] = {
@@ -223,77 +227,16 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
       .map(_ => true)
   }
 
-  def getTransaction(txid: ByteVector32): Future[Transaction] = {
-    extendedBitcoinClient.getTransaction(txid)
-  }
-
-  def getTransactionMeta(txid: ByteVector32)(implicit ec: ExecutionContext): Future[GetTxWithMetaResponse] = {
-    extendedBitcoinClient.getTransactionMeta(txid)
-  }
-
-  def getTxConfirmations(txid: ByteVector32): Future[Option[Int]] = {
+  override def doubleSpent(tx: Transaction): Future[Boolean] =
     for {
-      utxos <- listUtxos
-      utxo = utxos.find(_.txid.bytes == txid.bytes)
-      blockHash = for {
-        u <- utxo
-        b <- u.blockHash
-      } yield b
-      chainApi <- chainApiFromDb()
-      conf <- blockHash match {
-        case Some(b) =>
-          chainApi.getNumberOfConfirmations(b)
-        case _ => FutureUtil.none
-      }
+      txs <- wallet.listTransactions()
     } yield {
-      conf
-    }
-  }
-
-  def getTransactionShortId(txid: ByteVector32)(implicit ec: ExecutionContext): Future[(Int, Int)] =
-    extendedBitcoinClient.getTransactionShortId(txid)
-
-  def isTransactionOutputSpendable(txid: ByteVector32, outputIndex: Int, includeMempool: Boolean)(implicit ec: ExecutionContext): Future[Boolean] = {
-    extendedBitcoinClient.isTransactionOutputSpendable(txid, outputIndex, includeMempool)
-  }
-
-  def getMempool()(implicit ec: ExecutionContext): Future[Seq[Transaction]] = {
-    extendedBitcoinClient.getMempool()
-  }
-
-  def lookForSpendingTx(blockhash_opt: Option[ByteVector32], txid: ByteVector32, outputIndex: Int)(implicit ec: ExecutionContext): Future[Transaction] = {
-    extendedBitcoinClient.lookForSpendingTx(blockhash_opt, txid, outputIndex)
-  }
-
-  def validate(c: ChannelAnnouncement)(implicit ec: ExecutionContext): Future[ValidateResult] = {
-    extendedBitcoinClient.validate(c)
-  }
-
-  override def doubleSpent(tx: Transaction): Future[Boolean] = {
-    // stolen from BitcoinCoreWallet.scala
-    for {
-      exists <- extendedBitcoinClient.getTransaction(tx.txid)
-        .map(_ => true) // we have found the transaction
-        .recover {
-          case JsonRPCError(Error(_, message)) if message.contains("index") =>
-            sys.error("Fatal error: bitcoind is indexing!!")
-            System.exit(1) // bitcoind is indexing, that's a fatal error!!
-            false // won't be reached
-          case _ => false
+      txs
+        .map(txn => toAcinqTransaction(txn.transaction))
+        .exists { spendingTx =>
+          spendingTx.txIn.map(_.outPoint).toSet.intersect(tx.txIn.map(_.outPoint).toSet).nonEmpty && spendingTx.txid != tx.txid
         }
-      doubleSpent <- if (exists) {
-        // if the tx is in the blockchain, it can't have been double-spent
-        Future.successful(false)
-      } else {
-        // if the tx wasn't in the blockchain and one of it's input has been spent, it is double-spent
-        // NB: we don't look in the mempool, so it means that we will only consider that the tx has been double-spent if
-        // the overriding transaction has been confirmed at least once
-        Future.sequence(tx.txIn.map(txIn =>
-          extendedBitcoinClient.isTransactionOutputSpendable(txIn.outPoint.txid, txIn.outPoint.index.toInt, includeMempool = false)))
-          .map(_.exists(_ == false))
-      }
-    } yield doubleSpent
-  }
+    }
 
   def listReservedUtxos: Future[Vector[SpendingInfoDb]] = {
     wallet.listUtxos(TxoState.Reserved)
@@ -312,24 +255,32 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
     } yield tx.txid.toHex
   }
 
-  def hasWallet: Future[Boolean] = {
-    val walletDB = walletConf.dbPath resolve walletConf.dbName
-    val hdCoin = walletConf.defaultAccount.coin
-    if (Files.exists(walletDB) && walletConf.seedExists()) {
-      AccountDAO().read((hdCoin, 0)).map(_.isDefined)
-    } else {
-      Future.successful(false)
+  private def createChainCallbacks()(implicit
+                                     chainConf: ChainAppConfig,
+                                     ec: ExecutionContext): Future[ChainCallbacks] = {
+    lazy val onHeaderConnected: OnBlockHeaderConnected = {
+      case (height, header) =>
+        Future.successful(watcher.foreach(_ ! BlockHeaderConnected(height, toAcinqBlockHeader(header))))
     }
+
+    Future.successful(ChainCallbacks(onBlockHeaderConnected = Vector(onHeaderConnected)))
   }
 
   private def createWalletCallbacks()(implicit
                                       walletConf: WalletAppConfig,
                                       ec: ExecutionContext): Future[WalletCallbacks] = {
-    lazy val onTransactionProcessed: OnTransactionProcessed = { tx =>
-      Future.successful(watcher.foreach(_ ! NewTransaction(toAcinqTransaction(tx))))
+    lazy val onBlockTransactionProcessed: OnBlockTransactionProcessed = {
+      case (tx, blockHash, pos) =>
+        for {
+          height <- getBlockHeight(blockHash)
+        } yield {
+          watcher.foreach(_ ! TransactionProcessed(height.getOrElse(throw new RuntimeException(s"unknown block hash ${blockHash}")), toAcinqTransaction(tx), ByteVector32(blockHash.bytes), pos))
+        }
     }
 
-    Future.successful(WalletCallbacks(onTransactionProcessed = Vector(onTransactionProcessed)))
+    Future.successful(WalletCallbacks(
+      onBlockTransactionProcessed = Vector(onBlockTransactionProcessed)
+    ))
   }
 
   private def createNodeCallbacks(wallet: Wallet)(implicit
@@ -349,9 +300,7 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
       if (headers.isEmpty) {
         Future.unit
       } else {
-        for {
-          _ <- wallet.updateUtxoPendingStates()
-        } yield watcher.foreach(_ ! NewBlockHeader(toAcinqBlockHeader(headers.last)))
+        wallet.updateUtxoPendingStates().map(_ => ())
       }
     }
     Future.successful(
@@ -361,33 +310,9 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
       ))
   }
 
-  /** Creates a wallet based on the given [[WalletAppConfig]]*/
-  def initWallet(implicit walletConf: WalletAppConfig, ec: ExecutionContext): Future[Wallet] = {
-    hasWallet.flatMap { walletExists =>
-      if (walletExists) {
-        // TODO change me when we implement proper password handling
-        BIP39LockedKeyManager.unlock(BIP39KeyManager.badPassphrase,
-          bip39PasswordOpt,
-          walletConf.kmParams) match {
-          case Right(_) =>
-            Future.successful(wallet)
-          case Left(err) =>
-            sys.error(s"Error initializing key manager, err=$err")
-        }
-      } else {
-        Wallet.initialize(wallet = wallet,
-          bip39PasswordOpt = bip39PasswordOpt)
-      }
-    }
-  }
-
-  val genesisHeader: BlockHeader = walletConf.network.chainParams.genesisBlock.blockHeader
-  val genesisHeaderDb: BlockHeaderDb = BlockHeaderDbHelper.fromBlockHeader(height = 0, chainWork = Pow.getBlockProof(genesisHeader), bh = genesisHeader)
-
   /** Initializes the wallet and starts the node */
-  def start(): Future[BitcoinSWallet] = {
+  def start(): Future[NeutrinoWallet] =
     startedWalletF.map(_ => this)
-  }
 
   private def toBitcoinsTx(tx: fr.acinq.bitcoin.Transaction): org.bitcoins.core.protocol.transaction.Transaction = {
     org.bitcoins.core.protocol.transaction.Transaction.fromBytes(tx.bin)
@@ -395,23 +320,17 @@ class BitcoinSWallet(extendedBitcoinClient: BitcoinSBitcoinClient, watcher: Opti
 
   private def toInputStream(bytes: ByteVector): ByteArrayInputStream = new ByteArrayInputStream(bytes.toArray)
 
-  private def toAcinqBlockHeader(bitcoinSHeader: org.bitcoins.core.protocol.blockchain.BlockHeader): fr.acinq.bitcoin.BlockHeader = {
-    val acinqHeader = fr.acinq.bitcoin.BlockHeader.read(toInputStream(bitcoinSHeader.bytes))
-    require(acinqHeader.hash.bytes == bitcoinSHeader.hash.bytes)
-    acinqHeader
-  }
+  private def toAcinqBlockHeader(bitcoinSHeader: org.bitcoins.core.protocol.blockchain.BlockHeader): fr.acinq.bitcoin.BlockHeader =
+    fr.acinq.bitcoin.BlockHeader.read(toInputStream(bitcoinSHeader.bytes))
 
-  private def toAcinqTransaction(bitcoinSTx: org.bitcoins.core.protocol.transaction.Transaction): fr.acinq.bitcoin.Transaction = {
-    val acinqTx = fr.acinq.bitcoin.Transaction.read(toInputStream(bitcoinSTx.bytes))
-//    require(acinqTx.txid.bytes == bitcoinSTx.txIdBE.bytes)
-    acinqTx
-  }
+  private def toAcinqTransaction(bitcoinSTx: org.bitcoins.core.protocol.transaction.Transaction): fr.acinq.bitcoin.Transaction =
+    fr.acinq.bitcoin.Transaction.read(toInputStream(bitcoinSTx.bytes))
 }
 
-object BitcoinSWallet {
+object NeutrinoWallet {
   val defaultDatadir: Path = Paths.get(Properties.userHome, ".bitcoin-s")
 
-  def fromDatadir(extendedBitcoinClient: BitcoinSBitcoinClient, datadir: Path = defaultDatadir, watcher: Option[ActorRef] = None, overrideConfig: Config = ConfigFactory.empty())(implicit system: ActorSystem): Future[BitcoinSWallet] = {
+  def fromDatadir(datadir: Path = defaultDatadir, watcher: Option[ActorRef] = None, overrideConfig: Config = ConfigFactory.empty())(implicit system: ActorSystem): Future[NeutrinoWallet] = {
     import system.dispatcher
     val segwitConf = ConfigFactory.parseString("bitcoin-s.wallet.defaultAccountType = segwit")
     val sysProps = ConfigFactory.parseProperties(System.getProperties)
@@ -435,7 +354,7 @@ object BitcoinSWallet {
       _ <- chainConf.start()
       _ <- walletConf.start()
       _ <- nodeConf.start()
-      wallet <- new BitcoinSWallet(extendedBitcoinClient, watcher).start()
+      wallet <- new NeutrinoWallet(watcher).start()
     } yield wallet
   }
 }

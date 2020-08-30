@@ -329,15 +329,6 @@ class Channel(val nodeParams: NodeParams, val wallet: EclairWallet, remoteNodeId
             htlcBasepoint = open.htlcBasepoint,
             features = remoteInit.features)
           log.debug("remote params: {}", remoteParams)
-          wallet match {
-            case neutrino: Neutrino =>
-              val fundingPubkeyScript = Script.write(Script.pay2wsh(Scripts.multiSig2of2(remoteParams.fundingPubKey, fundingPubkey)))
-              neutrino
-                .watchPubKeyScript(fundingPubkeyScript)
-                .failed
-                .foreach(ex => log.error("cannot start watching the funding transaction", ex))
-            case _ => ()
-          }
           goto(WAIT_FOR_FUNDING_CREATED) using DATA_WAIT_FOR_FUNDING_CREATED(open.temporaryChannelId, localParams, remoteParams, open.fundingSatoshis, open.pushMsat, open.feeratePerKw, open.firstPerCommitmentPoint, open.channelFlags, channelVersion, accept) sending accept
       }
 

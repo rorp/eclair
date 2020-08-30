@@ -47,7 +47,7 @@ import scala.jdk.CollectionConverters._
 import scala.util.Try
 
 
-class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with AnyFunSuiteLike with BeforeAndAfterAll with Logging {
+class NeutrinoWalletBasicSpec extends TestKitBaseClass with BitcoindService with AnyFunSuiteLike with BeforeAndAfterAll with Logging {
 
   val commonConfig: Config = ConfigFactory.parseMap(Map(
     "eclair.chain" -> "regtest",
@@ -69,7 +69,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     stopBitcoind()
   }
 
-  def initWallet: Future[(BitcoinSWallet, BitcoinSBitcoinClient)] = {
+  def initWallet: Future[(NeutrinoWallet, BitcoinSBitcoinClient)] = {
     val bitcoinClient = new BasicBitcoinJsonRPCClient(
       user = config.getString("bitcoind.rpcuser"),
       password = config.getString("bitcoind.rpcpassword"),
@@ -79,8 +79,8 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
 
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
     for {
-      wallet <- BitcoinSWallet
-        .fromDatadir(extendedBitcoind, datadir)
+      wallet <- NeutrinoWallet
+        .fromDatadir(datadir)
       started <- wallet.start()
       addr <- started.getReceiveAddress
       // fixme kinda hacky, but this way we only process confirmed blocks and don't spend immature coinbases
@@ -99,7 +99,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     val sender = TestProbe()
 
     initWallet.pipeTo(sender.ref)
-    val (wallet, extendedBitcoind) = sender.expectMsgType[(BitcoinSWallet, BitcoinSBitcoinClient)]
+    val (wallet, extendedBitcoind) = sender.expectMsgType[(NeutrinoWallet, BitcoinSBitcoinClient)]
 
     wallet.getBalance.pipeTo(sender.ref)
     assert(sender.expectMsgType[Satoshi] > 0.sat)
@@ -155,7 +155,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     val sender = TestProbe()
 
     initWallet.pipeTo(sender.ref)
-    val wallet = sender.expectMsgType[BitcoinSWallet]
+    val wallet = sender.expectMsgType[NeutrinoWallet]
 
     wallet.getBalance.pipeTo(sender.ref)
     assert(sender.expectMsgType[Satoshi] > 0.sat)
@@ -190,10 +190,10 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     val extendedBitcoind = new BitcoinSBitcoinClient(bitcoinClient)
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
 
-    val walletF: Future[BitcoinSWallet] = {
+    val walletF: Future[NeutrinoWallet] = {
       for {
-        wallet <- BitcoinSWallet
-          .fromDatadir(extendedBitcoind, datadir)
+        wallet <- NeutrinoWallet
+          .fromDatadir(datadir)
         started <- wallet.start()
         addr <- started.getReceiveAddress
         // fixme kinda hacky, but this way we only process confirmed blocks and don't spend immature coinbases
@@ -206,7 +206,7 @@ class BitcoinSWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     val sender = TestProbe()
 
     walletF.pipeTo(sender.ref)
-    val wallet = sender.expectMsgType[BitcoinSWallet]
+    val wallet = sender.expectMsgType[NeutrinoWallet]
 
     // first let's create a tx
     val address = "n2YKngjUp139nkjKvZGnfLRN6HzzYxJsje"

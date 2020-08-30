@@ -72,7 +72,7 @@ object EclairWallet {
     /**
      * Requests the underlying Neutrino wallet to watch the given public key script.
      */
-    def watchPubKeyScript(pubkeyScript: ByteVector): Future[Unit]
+    def watchPublicKeyScript(pubkeyScript: ByteVector): Future[Unit]
   }
 
 }

@@ -39,7 +39,7 @@ import scala.concurrent.Future
 import scala.jdk.CollectionConverters._
 
 
-class BitcoinSWalletSpec extends TestKitBaseClass with BitcoindService with AnyFunSuiteLike with BeforeAndAfterAll with Logging {
+class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyFunSuiteLike with BeforeAndAfterAll with Logging {
 
   val commonConfig: Config = ConfigFactory.parseMap(Map(
     "eclair.chain" -> "regtest",
@@ -60,11 +60,11 @@ class BitcoinSWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
     startBitcoind()
   }
 
-  override def afterAll: Unit = {
+  override def afterAll(): Unit = {
     stopBitcoind()
   }
 
-  def initWallet: Future[(BitcoinSWallet, BitcoinSBitcoinClient)] = {
+  def initWallet: Future[(NeutrinoWallet, BitcoinSBitcoinClient)] = {
     val bitcoinClient = new BasicBitcoinJsonRPCClient(
       user = config.getString("bitcoind.rpcuser"),
       password = config.getString("bitcoind.rpcpassword"),
@@ -76,13 +76,13 @@ class BitcoinSWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
 
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
     for {
-      wallet <- BitcoinSWallet
-        .fromDatadir(extendedBitcoind, datadir, overrideConfig = peerConfig)
+      wallet <- NeutrinoWallet
+        .fromDatadir(datadir, overrideConfig = peerConfig)
       started <- wallet.start()
     } yield (started, extendedBitcoind)
   }
 
-  def initFundedWallet: Future[BitcoinSWallet] = {
+  def initFundedWallet: Future[NeutrinoWallet] = {
     for {
       (wallet, extendedBitcoind) <- initWallet
       addr <- wallet.getReceiveAddress
@@ -99,7 +99,7 @@ class BitcoinSWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
 
   test("process a block") {
     initWallet.pipeTo(sender.ref)
-    val (wallet, extendedBitcoind) = sender.expectMsgType[(BitcoinSWallet, BitcoinSBitcoinClient)]
+    val (wallet, extendedBitcoind) = sender.expectMsgType[(NeutrinoWallet, BitcoinSBitcoinClient)]
 
     wallet.getBalance.pipeTo(sender.ref)
     assert(sender.expectMsgType[Satoshi] == 0.sat)
