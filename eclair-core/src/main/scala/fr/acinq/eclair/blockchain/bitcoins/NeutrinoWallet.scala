@@ -7,7 +7,7 @@ import akka.Done
 import akka.actor.ActorSystem
 import com.typesafe.config.{Config, ConfigFactory}
 import fr.acinq.bitcoin.Crypto.PublicKey
-import fr.acinq.bitcoin.{ByteVector32, Satoshi, Transaction}
+import fr.acinq.bitcoin.{ByteVector32, Satoshi, Transaction, _}
 import fr.acinq.eclair.blockchain.EclairWallet.Neutrino
 import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.WalletTransaction
@@ -36,7 +36,8 @@ import org.bitcoins.wallet.Wallet
 import org.bitcoins.wallet.config.WalletAppConfig
 import scodec.bits.ByteVector
 
-import scala.concurrent.{ExecutionContext, Future, Promise}
+import scala.concurrent.duration.Duration
+import scala.concurrent.{Await, ExecutionContext, Future, Promise}
 import scala.util.Properties
 
 class NeutrinoWallet(initialSyncDone: Option[Promise[Done]], bip39PasswordOpt: Option[String] = None)(implicit system: ActorSystem,
@@ -333,34 +334,50 @@ class NeutrinoWallet(initialSyncDone: Option[Promise[Done]], bip39PasswordOpt: O
     fr.acinq.bitcoin.Transaction.read(toInputStream(bitcoinSTx.bytes))
 }
 
-object NeutrinoWallet {
+object NeutrinoWallet extends Logging {
   val defaultDatadir: Path = Paths.get(Properties.userHome, ".bitcoin-s")
 
-  def fromDatadir(datadir: Path = defaultDatadir, initialSyncDone: Option[Promise[Done]] = None, overrideConfig: Config = ConfigFactory.empty())(implicit system: ActorSystem): Future[NeutrinoWallet] = {
+  def fromDatadir(datadir: Path = defaultDatadir, chainHash: ByteVector32, overrideConfig: Config = ConfigFactory.empty())(implicit system: ActorSystem): NeutrinoWallet = {
     import system.dispatcher
+    val networkConf = networkConfig(chainHash)
     val segwitConf = ConfigFactory.parseString("bitcoin-s.wallet.defaultAccountType = segwit")
     val sysProps = ConfigFactory.parseProperties(System.getProperties)
 
-    implicit val walletConf: WalletAppConfig = {
-      val config = WalletAppConfig(datadir, sysProps, segwitConf, overrideConfig)
-      config
+    implicit val walletConf: WalletAppConfig = WalletAppConfig(datadir, sysProps, segwitConf, networkConf)
+
+    implicit val nodeConf: NodeAppConfig = NodeAppConfig(datadir, sysProps, segwitConf, networkConf)
+
+    implicit val chainConf: ChainAppConfig = ChainAppConfig(datadir, sysProps, segwitConf, networkConf)
+
+    val initialSyncDone: Promise[Done] = if (chainConf.chain.network == RegTest) {
+      // don't wait for full sync on regtest
+      Promise.successful(Done)
+    } else {
+      Promise[Done]()
     }
 
-    implicit val nodeConf: NodeAppConfig = {
-      val config = NodeAppConfig(datadir, sysProps, segwitConf, overrideConfig)
-      config
-    }
-
-    implicit val chainConf: ChainAppConfig = {
-      val config = ChainAppConfig(datadir, sysProps, segwitConf, overrideConfig)
-      config
-    }
-
-    for {
+    val wallet = for {
       _ <- chainConf.start()
       _ <- walletConf.start()
       _ <- nodeConf.start()
-      wallet <- new NeutrinoWallet(initialSyncDone).start()
-    } yield wallet
+      started <- new NeutrinoWallet(Some(initialSyncDone)).start()
+      _ <- initialSyncDone.future
+    } yield started
+
+    Await.result(wallet, Duration.Inf)
+  }
+
+  def networkConfig(chainHash: ByteVector32): Config = {
+    val network_opt = chainHash match {
+      case Block.LivenetGenesisBlock.hash => Some("mainnet")
+      case Block.TestnetGenesisBlock.hash => Some("testnet3")
+      case Block.RegtestGenesisBlock.hash => Some("regtest")
+      case _ =>
+        logger.warn(s"Unknown chainHash ${chainHash}")
+        None
+    }
+    network_opt
+      .map(network => ConfigFactory.parseString(s"bitcoin-s.network = $network"))
+      .getOrElse(ConfigFactory.empty())
   }
 }

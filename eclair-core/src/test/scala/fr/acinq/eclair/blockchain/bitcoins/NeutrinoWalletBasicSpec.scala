@@ -78,16 +78,15 @@ class NeutrinoWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     val extendedBitcoind = new BitcoinSBitcoinClient(bitcoinClient)
 
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
+      val wallet = NeutrinoWallet
+        .fromDatadir(datadir, Block.RegtestGenesisBlock.hash)
     for {
-      wallet <- NeutrinoWallet
-        .fromDatadir(datadir)
-      started <- wallet.start()
-      addr <- started.getReceiveAddress
+      addr <- wallet.getReceiveAddress
       // fixme kinda hacky, but this way we only process confirmed blocks and don't spend immature coinbases
       hashes <- extendedBitcoind.generateToAddress(10, BitcoinAddress.fromString(addr))
       _ <- extendedBitcoind.generateToAddress(101, BitcoinAddress.fromString(addr))
       _ <- extendedBitcoind.downloadBlocks(hashes.map(_.flip))
-    } yield (started, extendedBitcoind)
+    } yield (wallet, extendedBitcoind)
   }
 
   test("wait bitcoind ready") {
@@ -191,16 +190,15 @@ class NeutrinoWalletBasicSpec extends TestKitBaseClass with BitcoindService with
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
 
     val walletF: Future[NeutrinoWallet] = {
+      val wallet = NeutrinoWallet
+        .fromDatadir(datadir, Block.RegtestGenesisBlock.hash)
       for {
-        wallet <- NeutrinoWallet
-          .fromDatadir(datadir)
-        started <- wallet.start()
-        addr <- started.getReceiveAddress
+        addr <- wallet.getReceiveAddress
         // fixme kinda hacky, but this way we only process confirmed blocks and don't spend immature coinbases
         hashes <- extendedBitcoind.generateToAddress(10, BitcoinAddress.fromString(addr))
         _ <- extendedBitcoind.generateToAddress(101, BitcoinAddress.fromString(addr))
         _ <- extendedBitcoind.downloadBlocks(hashes.map(_.flip))
-      } yield started
+      } yield wallet
     }
 
     val sender = TestProbe()

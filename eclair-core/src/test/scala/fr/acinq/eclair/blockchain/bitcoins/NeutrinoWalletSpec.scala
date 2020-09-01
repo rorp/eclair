@@ -21,7 +21,7 @@ import java.nio.file.Path
 import akka.pattern.pipe
 import akka.testkit.TestProbe
 import com.typesafe.config.{Config, ConfigFactory}
-import fr.acinq.bitcoin.Satoshi
+import fr.acinq.bitcoin.{Block, Satoshi}
 import fr.acinq.eclair.blockchain.bitcoind.BitcoindService
 import fr.acinq.eclair.blockchain.bitcoind.rpc.BasicBitcoinJsonRPCClient
 import fr.acinq.eclair.blockchain.bitcoins.rpc.BitcoinSBitcoinClient
@@ -75,11 +75,9 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
     val peerConfig = ConfigFactory.parseString(s"""bitcoin-s.node.peers = ["${config.getString("bitcoind.host")}:${config.getInt("bitcoind.port")}"]""")
 
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
-    for {
-      wallet <- NeutrinoWallet
-        .fromDatadir(datadir, overrideConfig = peerConfig)
-      started <- wallet.start()
-    } yield (started, extendedBitcoind)
+    val wallet = NeutrinoWallet
+      .fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
+    Future.successful((wallet, extendedBitcoind))
   }
 
   def initFundedWallet: Future[NeutrinoWallet] = {

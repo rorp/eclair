@@ -140,17 +140,7 @@ class Setup(datadir: File,
 
   val bitcoin = nodeParams.watcherType match {
     case NEUTRINO =>
-      val initialSyncDone: Promise[Done] = if (NodeParams.chainFromHash(nodeParams.chainHash) == "regtest") {
-        // don't wait for full sync on regtest
-        Promise.successful(Done)
-      } else
-        Promise[Done]()
-      val neutrinoWallet = for {
-        wallet <- NeutrinoWallet.fromDatadir(datadir.toPath, Some(initialSyncDone))
-        started <- wallet.start()
-        _ <- initialSyncDone.future
-      } yield started
-      Neutrino(Await.result(neutrinoWallet, Duration.Inf))
+      Neutrino(NeutrinoWallet.fromDatadir(datadir.toPath, nodeParams.chainHash))
     case BITCOIND =>
       val bitcoinClient = new BasicBitcoinJsonRPCClient(
         user = config.getString("bitcoind.rpcuser"),
