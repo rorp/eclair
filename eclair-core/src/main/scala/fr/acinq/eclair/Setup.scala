@@ -140,7 +140,17 @@ class Setup(datadir: File,
 
   val bitcoin = nodeParams.watcherType match {
     case NEUTRINO =>
-      Neutrino
+      val initialSyncDone: Promise[Done] = if (NodeParams.chainFromHash(nodeParams.chainHash) == "regtest") {
+        // don't wait for full sync on regtest
+        Promise.successful(Done)
+      } else
+        Promise[Done]()
+      val neutrinoWallet = for {
+        wallet <- NeutrinoWallet.fromDatadir(datadir.toPath, Some(initialSyncDone))
+        started <- wallet.start()
+        _ <- initialSyncDone.future
+      } yield started
+      Neutrino(Await.result(neutrinoWallet, Duration.Inf))
     case BITCOIND =>
       val bitcoinClient = new BasicBitcoinJsonRPCClient(
         user = config.getString("bitcoind.rpcuser"),
@@ -264,10 +274,10 @@ class Setup(datadir: File,
           zmqBlockConnected.success(Done)
           zmqTxConnected.success(Done)
           system.actorOf(SimpleSupervisor.props(Props(new ElectrumWatcher(blockCount, electrumClient)), "watcher", SupervisorStrategy.Resume))
-        case Neutrino =>
+        case Neutrino(neutrinoWallet) =>
           zmqBlockConnected.success(Done)
           zmqTxConnected.success(Done)
-          system.actorOf(SimpleSupervisor.props(Props(new NeutrinoWatcher(blockCount)), "watcher", SupervisorStrategy.Resume))
+          system.actorOf(SimpleSupervisor.props(Props(new NeutrinoWatcher(blockCount, neutrinoWallet)), "watcher", SupervisorStrategy.Resume))
       }
 
       router = system.actorOf(SimpleSupervisor.props(Router.props(nodeParams, watcher, Some(routerInitialized)), "router", SupervisorStrategy.Resume))
@@ -275,12 +285,7 @@ class Setup(datadir: File,
       _ <- Future.firstCompletedOf(routerInitialized.future :: routerTimeout :: Nil)
 
       wallet = bitcoin match {
-        case Neutrino =>
-          val neutrinoWallet = for {
-            wallet <- NeutrinoWallet.fromDatadir(datadir.toPath, Option(watcher))
-            started <- wallet.start()
-          } yield started
-          Await.result(neutrinoWallet, Duration.Inf)
+        case Neutrino(neutrinoWallet) => neutrinoWallet
         case Bitcoind(bitcoinClient) => new BitcoinCoreWallet(bitcoinClient)
         case Electrum(electrumClient) =>
           val sqlite = DriverManager.getConnection(s"jdbc:sqlite:${new File(chaindir, "wallet.sqlite")}")
@@ -383,7 +388,7 @@ class Setup(datadir: File,
 sealed trait Bitcoin
 case class Bitcoind(bitcoinClient: BasicBitcoinJsonRPCClient) extends Bitcoin
 case class Electrum(electrumClient: ActorRef) extends Bitcoin
-case object Neutrino extends Bitcoin
+case class Neutrino(neutrinoWallet: NeutrinoWallet) extends Bitcoin
 // @formatter:on
 
 case class Kit(nodeParams: NodeParams,

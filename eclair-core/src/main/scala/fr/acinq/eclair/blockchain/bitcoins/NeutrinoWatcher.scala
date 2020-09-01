@@ -4,52 +4,68 @@ import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 
 import akka.actor.{Actor, ActorLogging, Stash, Terminated}
-import fr.acinq.bitcoin.{BlockHeader, ByteVector32, Transaction}
+import fr.acinq.bitcoin.{BlockHeader, ByteVector32, Script, Transaction, TxIn, TxOut}
 import fr.acinq.eclair.blockchain._
 import fr.acinq.eclair.channel.BITCOIN_PARENT_TX_CONFIRMED
 import fr.acinq.eclair.transactions.Scripts
+import fr.acinq.eclair.{LongToBtcAmount, ShortChannelId, TxCoordinates}
 
 import scala.collection.immutable.{Queue, SortedMap}
-import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.DurationInt
+import scala.concurrent.{Await, ExecutionContext}
 
 sealed trait NeutrinoEvent
 case class BestBlockHeader(height: Int, blockHeader: BlockHeader) extends NeutrinoEvent
 case class BlockHeaderConnected(height: Int, blockHeader: BlockHeader) extends NeutrinoEvent
 case class TransactionProcessed(height: Int, tx: Transaction, blockHash: ByteVector32, pos: Int) extends NeutrinoEvent
 
-class NeutrinoWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = ExecutionContext.global) extends Actor with Stash with ActorLogging {
+class NeutrinoWatcher(blockCount: AtomicLong, wallet: NeutrinoWallet)(implicit ec: ExecutionContext = ExecutionContext.global) extends Actor with Stash with ActorLogging {
+
+  context.system.eventStream.subscribe(self, classOf[NeutrinoEvent])
+
+  val init = for {
+    (height, tip) <- wallet.getBestBlockHeader()
+  } yield  {
+    log.info(s"setting blockCount=${height}")
+    blockCount.set(height)
+    self ! BestBlockHeader(height, tip)
+  }
+  init.failed.foreach(log.error("cannot initialize neutrino watcher ", _))
+  Await.result(init, 10 seconds)
+
+  override def unhandled(message: Any): Unit = message match {
+    case ValidateRequest(c) =>
+      log.info(s"blindly validating channel=$c")
+      val pubkeyScript = Script.write(Script.pay2wsh(Scripts.multiSig2of2(c.bitcoinKey1, c.bitcoinKey2)))
+      val TxCoordinates(_, _, outputIndex) = ShortChannelId.coordinates(c.shortChannelId)
+      val fakeFundingTx = Transaction(
+        version = 2,
+        txIn = Seq.empty[TxIn],
+        txOut = List.fill(outputIndex + 1)(TxOut(0 sat, pubkeyScript)), // quick and dirty way to be sure that the outputIndex'th output is of the expected format
+        lockTime = 0)
+      sender ! ValidateResult(c, Right((fakeFundingTx, UtxoStatus.Unspent)))
+
+    case _ => log.warning(s"unhandled message $message")
+  }
 
   override def receive: Receive = uninitialized()
 
   def uninitialized(): Receive = {
-    case wallet: NeutrinoWallet =>
-      val init = for {
-        (height, tip) <- wallet.getBestBlockHeader()
-      } yield  {
-        log.info(s"setting blockCount=${height}")
-        blockCount.set(height)
-        self ! (BestBlockHeader(height, tip), wallet)
-      }
-      init.failed.foreach(log.error("cannot initialize neutrino watcher ", _))
-    case (BestBlockHeader(height, tip), wallet: NeutrinoWallet) =>
-      context.become(running(wallet, height, tip, Set.empty, Map.empty, SortedMap.empty, Queue.empty))
-      context.system.eventStream.subscribe(self, classOf[NeutrinoEvent])
+    case BestBlockHeader(height, tip) =>
+      context.become(running(height, tip, Set.empty, Map.empty, SortedMap.empty, Queue.empty))
   }
 
-  def running(wallet: NeutrinoWallet, height: Int, tip: BlockHeader, watches: Set[Watch], scriptHashStatus: Map[ByteVector32, String], block2tx: SortedMap[Long, Seq[Transaction]], sent: Queue[Transaction]): Receive = {
+  def running(height: Int, tip: BlockHeader, watches: Set[Watch], scriptHashStatus: Map[ByteVector32, String], block2tx: SortedMap[Long, Seq[Transaction]], sent: Queue[Transaction]): Receive = {
     case BlockHeaderConnected(_, newtip) if tip == newtip => ()
 
     case BlockHeaderConnected(newheight, newtip) =>
-      log.info(s"new tip: ${newtip.blockId} $newheight")
+      log.debug(s"new tip: ${newtip.blockId} $newheight")
 
-      log.info(s"setting blockCount=${newheight}")
       blockCount.set(newheight)
-      // TODO uncomment?
-//      context.system.eventStream.publish(CurrentBlockCount(newheight))
 
       val toPublish = block2tx.filterKeys(_ <= newheight)
       toPublish.values.flatten.foreach(tx => self ! PublishAsap(tx))
-      context become running(wallet, newheight, newtip, watches, scriptHashStatus, block2tx -- toPublish.keys, sent)
+      context become running(newheight, newtip, watches, scriptHashStatus, block2tx -- toPublish.keys, sent)
 
     case watch: Watch if watches.contains(watch) => ()
 
@@ -57,23 +73,25 @@ class NeutrinoWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
       log.info(s"added watch-spent on output=$txid:$outputIndex publicKeyScript=$publicKeyScript")
       wallet.watchPublicKeyScript(publicKeyScript)
       context.watch(watch.channel)
-      context become running(wallet, height, tip, watches + watch, scriptHashStatus, block2tx, sent)
+      context become running(height, tip, watches + watch, scriptHashStatus, block2tx, sent)
 
     case watch@WatchSpentBasic(_, txid, outputIndex, publicKeyScript, _) =>
       log.info(s"added watch-spent-basic on output=$txid:$outputIndex publicKeyScript=$publicKeyScript")
       wallet.watchPublicKeyScript(publicKeyScript)
       context.watch(watch.channel)
-      context become running(wallet, height, tip, watches + watch, scriptHashStatus, block2tx, sent)
+      context become running(height, tip, watches + watch, scriptHashStatus, block2tx, sent)
 
     case watch@WatchConfirmed(_, txid, publicKeyScript, _, _) =>
       log.info(s"added watch-confirmed on txid=$txid publicKeyScript=$publicKeyScript")
       wallet.watchPublicKeyScript(publicKeyScript)
       context.watch(watch.channel)
-      context become running(wallet, height, tip, watches + watch, scriptHashStatus, block2tx, sent)
+      context become running(height, tip, watches + watch, scriptHashStatus, block2tx, sent)
+
+    case _: WatchLost => () // TODO: not implemented
 
     case Terminated(actor) =>
       val watches1 = watches.filterNot(_.channel == actor)
-      context become running(wallet, height, tip, watches1, scriptHashStatus, block2tx, sent)
+      context become running(height, tip, watches1, scriptHashStatus, block2tx, sent)
 
     case TransactionProcessed(txheight, tx, _, pos) =>
       // this is for WatchSpent/WatchSpendBasic
@@ -98,7 +116,7 @@ class NeutrinoWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
           channel ! WatchEventConfirmed(event, txheight.toInt, pos, tx)
           w
       }
-      context become running(wallet, height, tip, watches -- watchSpentTriggered -- watchConfirmedTriggered, scriptHashStatus, block2tx, sent)
+      context become running(height, tip, watches -- watchSpentTriggered -- watchConfirmedTriggered, scriptHashStatus, block2tx, sent)
 
     case PublishAsap(tx) =>
       val blockCount = this.blockCount.get()
@@ -113,10 +131,10 @@ class NeutrinoWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
       } else if (cltvTimeout > blockCount) {
         log.info(s"delaying publication of txid=${tx.txid} until block=$cltvTimeout (curblock=$blockCount)")
         val block2tx1 = block2tx.updated(cltvTimeout, block2tx.getOrElse(cltvTimeout, Seq.empty[Transaction]) :+ tx)
-        context become running(wallet, height, tip, watches, scriptHashStatus, block2tx1, sent)
+        context become running(height, tip, watches, scriptHashStatus, block2tx1, sent)
       } else {
         publish(wallet, tx)
-        context become running(wallet, height, tip, watches, scriptHashStatus, block2tx, sent :+ tx)
+        context become running(height, tip, watches, scriptHashStatus, block2tx, sent :+ tx)
       }
 
     case WatchEventConfirmed(BITCOIN_PARENT_TX_CONFIRMED(tx), blockHeight, _, _) =>
@@ -127,10 +145,10 @@ class NeutrinoWatcher(blockCount: AtomicLong)(implicit ec: ExecutionContext = Ex
       if (absTimeout > blockCount) {
         log.info(s"delaying publication of txid=${tx.txid} until block=$absTimeout (curblock=$blockCount)")
         val block2tx1 = block2tx.updated(absTimeout, block2tx.getOrElse(absTimeout, Seq.empty[Transaction]) :+ tx)
-        context become running(wallet, height, tip, watches, scriptHashStatus, block2tx1, sent)
+        context become running(height, tip, watches, scriptHashStatus, block2tx1, sent)
       } else {
         publish(wallet, tx)
-        context become running(wallet, height, tip, watches, scriptHashStatus, block2tx, sent :+ tx)
+        context become running(height, tip, watches, scriptHashStatus, block2tx, sent :+ tx)
       }
 
   }

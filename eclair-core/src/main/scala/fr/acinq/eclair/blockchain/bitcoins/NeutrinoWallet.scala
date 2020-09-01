@@ -3,7 +3,8 @@ package fr.acinq.eclair.blockchain.bitcoins
 import java.io.ByteArrayInputStream
 import java.nio.file.{Path, Paths}
 
-import akka.actor.{ActorRef, ActorSystem}
+import akka.Done
+import akka.actor.ActorSystem
 import com.typesafe.config.{Config, ConfigFactory}
 import fr.acinq.bitcoin.Crypto.PublicKey
 import fr.acinq.bitcoin.{ByteVector32, Satoshi, Transaction}
@@ -31,18 +32,17 @@ import org.bitcoins.feeprovider.BitcoinerLiveFeeRateProvider
 import org.bitcoins.node._
 import org.bitcoins.node.config.NodeAppConfig
 import org.bitcoins.node.models.Peer
+import org.bitcoins.wallet.Wallet
 import org.bitcoins.wallet.config.WalletAppConfig
-import org.bitcoins.wallet.{OnBlockTransactionProcessed, OnTransactionProcessed, Wallet, WalletCallbacks}
 import scodec.bits.ByteVector
 
-import scala.concurrent.duration._
-import scala.concurrent.{Await, ExecutionContext, Future}
+import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.Properties
 
-class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String] = None)(implicit system: ActorSystem,
-                                                                                         walletConf: WalletAppConfig,
-                                                                                         nodeConf: NodeAppConfig,
-                                                                                         chainConf: ChainAppConfig) extends EclairWallet with Neutrino with Logging {
+class NeutrinoWallet(initialSyncDone: Option[Promise[Done]], bip39PasswordOpt: Option[String] = None)(implicit system: ActorSystem,
+                                                                                                      walletConf: WalletAppConfig,
+                                                                                                      nodeConf: NodeAppConfig,
+                                                                                                      chainConf: ChainAppConfig) extends EclairWallet with Neutrino with Logging {
   logger.info("Initializing Bitcoin-S wallet")
 
   import system.dispatcher
@@ -74,15 +74,13 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
       nodeConf.network.port)
   private val peer = Peer.fromSocket(peerSocket)
   private val uninitializedNodeF = chainApiF.flatMap { _ =>
-    nodeConf.createNode(peer)(chainConf, system)
+    nodeConf.createNode(peer, initialSyncDone)(chainConf, system)
   }
 
   //get our wallet
   private val configuredWalletF: Future[Wallet] = for {
     uninitializedNode <- uninitializedNodeF
     chainApi <- chainApiF
-    walletCallbacks <- createWalletCallbacks()
-    _ = walletConf.addCallbacks(walletCallbacks)
     wallet <- walletConf.createHDWallet(uninitializedNode,
       chainApi,
       BitcoinerLiveFeeRateProvider(60),
@@ -105,7 +103,6 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
     wallet <- configuredWalletF
     _ <- node.start()
     _ <- wallet.start()
-    _ = watcher.foreach(_ ! this)
     _ <- node.sync()
     //    _ <- wallet.rescanNeutrinoWallet(startOpt = None, endOpt = None, addressBatchSize = 20, useCreationTime = true)
   } yield {
@@ -120,10 +117,8 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
   }
 
   startedWalletF.failed.foreach { err =>
-    logger.error(s"Error on Bitcoin-S wallet startup!", err)
+    logger.error(s"Error on Neutrino wallet startup!", err)
   }
-
-  private lazy val wallet: Wallet = Await.result(startedWalletF, Duration.Inf)
 
   def getBlockHeight(blockHash: DoubleSha256DigestBE): Future[Option[Int]] =
     chainApiFromDb().flatMap(_.getBlockHeight(blockHash))
@@ -142,6 +137,7 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
 
   def listTransactions(count: Int, skip: Int): Future[List[WalletTransaction]] = {
     for {
+      wallet <- startedWalletF
       utxos <- wallet.listUtxos()
     } yield {
       val txs = utxos.map { utxo =>
@@ -159,22 +155,31 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
     }
   }
 
-  def sendToAddress(address: String, amount: Satoshi, confirmationTarget: Long): Future[ByteVector32] =
-    wallet.sendToAddress(BitcoinAddress.fromString(address), Satoshis.apply(amount.toLong), None).map(tx => ByteVector32(tx.txIdBE.bytes))
+  def sendToAddress(address: String, amount: Satoshi, confirmationTarget: Long): Future[ByteVector32] = {
+    for {
+      wallet <- startedWalletF
+      tx <- wallet.sendToAddress(BitcoinAddress.fromString(address), Satoshis.apply(amount.toLong), None)
+    } yield ByteVector32(tx.txIdBE.bytes)
+  }
 
   override def getBalance: Future[OnChainBalance] = {
     for {
+      wallet <- startedWalletF
       confirmed <- wallet.getConfirmedBalance()
       unconfirmed <- wallet.getUnconfirmedBalance()
     } yield OnChainBalance(Satoshi(confirmed.satoshis.toLong), Satoshi(unconfirmed.satoshis.toLong))
   }
 
   override def getReceiveAddress: Future[String] = {
-    wallet.getNewAddress().map(_.value)
+    for {
+      wallet <- startedWalletF
+      address <- wallet.getNewAddress()
+    } yield address.value
   }
 
   override def getReceivePubkey(receiveAddress: Option[String] = None): Future[PublicKey] =
     for {
+      wallet <- startedWalletF
       addressStr <- receiveAddress.map(Future.successful).getOrElse(getReceiveAddress)
       address = BitcoinAddress.fromString(addressStr)
       addressInfo <- wallet.getAddressInfo(address)
@@ -190,10 +195,9 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
     val output = Vector(TransactionOutput(sats, spk))
     val feeRate = SatoshisPerKW(Satoshis(feeRatePerKw.feerate.toLong))
 
-    val fundedTxF = wallet.sendToOutputs(output, feeRate)
-
     for {
-      tx <- fundedTxF
+      wallet <- startedWalletF
+      tx <- wallet.sendToOutputs(output, feeRate)
       eclairTx = fr.acinq.bitcoin.Transaction.read(tx.bytes.toArray)
       outputIndex = tx.outputs.zipWithIndex
         .find(_._1.scriptPubKey == spk).get._2
@@ -204,11 +208,8 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
   override def watchPublicKeyScript(pubkeyScript: ByteVector): Future[Unit] = {
     val spk = ScriptPubKey.fromAsmBytes(pubkeyScript)
     for {
-      spks <- wallet.listScriptPubKeys()
-      _ <- spks.find(_.scriptPubKey == spk) match {
-        case None => wallet.watchScriptPubKey(spk)
-        case Some(_) => Future.unit
-      }
+      wallet <- startedWalletF
+      _ <- wallet.watchScriptPubKey(spk)
     } yield ()
   }
 
@@ -219,16 +220,18 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
   override def rollback(tx: Transaction): Future[Boolean] = {
     val bsTx = toBitcoinsTx(tx)
     val txOutPoints = bsTx.inputs.map(_.previousOutput)
-    val utxosInTxF = wallet.listUtxos(txOutPoints.toVector)
 
-    utxosInTxF.flatMap(utxos =>
-      // fixme temp hack to pass invariant
-      wallet.unmarkUTXOsAsReserved(utxos.map(_.copyWithState(TxoState.Reserved))))
-      .map(_ => true)
+    for {
+      wallet <- startedWalletF
+      utxos <- wallet.listUtxos(txOutPoints.toVector)
+      _ <- wallet.unmarkUTXOsAsReserved(utxos.map(_.copyWithState(TxoState.Reserved)))
+    } yield true
+
   }
 
   override def doubleSpent(tx: Transaction): Future[Boolean] =
     for {
+      wallet <- startedWalletF
       txs <- wallet.listTransactions()
     } yield {
       txs
@@ -239,16 +242,23 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
     }
 
   def listReservedUtxos: Future[Vector[SpendingInfoDb]] = {
-    wallet.listUtxos(TxoState.Reserved)
+    for {
+      wallet <- startedWalletF
+      utxos <- wallet.listUtxos(TxoState.Reserved)
+    } yield utxos
   }
 
   def listUtxos: Future[Vector[SpendingInfoDb]] = {
-    wallet.listUtxos()
+    for {
+      wallet <- startedWalletF
+      utxos <- wallet.listUtxos()
+    } yield utxos
   }
 
   def publishTransaction(tx: Transaction)(implicit ec: ExecutionContext): Future[String] = {
     val txn = toBitcoinsTx(tx)
     for {
+      wallet <- startedWalletF
       _ <- wallet.processTransaction(txn, None)
       node <- configuredNodeF
       _ <- node.broadcastTransaction(txn)
@@ -260,27 +270,10 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
                                      ec: ExecutionContext): Future[ChainCallbacks] = {
     lazy val onHeaderConnected: OnBlockHeaderConnected = {
       case (height, header) =>
-        Future.successful(watcher.foreach(_ ! BlockHeaderConnected(height, toAcinqBlockHeader(header))))
+        Future.successful(system.eventStream.publish(BlockHeaderConnected(height, toAcinqBlockHeader(header))))
     }
 
     Future.successful(ChainCallbacks(onBlockHeaderConnected = Vector(onHeaderConnected)))
-  }
-
-  private def createWalletCallbacks()(implicit
-                                      walletConf: WalletAppConfig,
-                                      ec: ExecutionContext): Future[WalletCallbacks] = {
-    lazy val onBlockTransactionProcessed: OnBlockTransactionProcessed = {
-      case (tx, blockHash, pos) =>
-        for {
-          height <- getBlockHeight(blockHash)
-        } yield {
-          watcher.foreach(_ ! TransactionProcessed(height.getOrElse(throw new RuntimeException(s"unknown block hash ${blockHash}")), toAcinqTransaction(tx), ByteVector32(blockHash.bytes), pos))
-        }
-    }
-
-    Future.successful(WalletCallbacks(
-      onBlockTransactionProcessed = Vector(onBlockTransactionProcessed)
-    ))
   }
 
   private def createNodeCallbacks(wallet: Wallet)(implicit
@@ -294,7 +287,20 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
     lazy val onBlock: OnBlockReceived = { block =>
       for {
         _ <- wallet.processBlock(block)
-      } yield ()
+        heightOpt <- getBlockHeight(block.blockHeader.hashBE).recover { ex =>
+          logger.error(s"cannot find block height for ${block.blockHeader.hashBE} ", ex)
+          None
+        }
+      } yield {
+        heightOpt match {
+          case Some(height) =>
+            block.transactions.zipWithIndex.foreach { case (tx, pos) =>
+              system.eventStream.publish(TransactionProcessed(height, toAcinqTransaction(tx), ByteVector32(block.blockHeader.hashBE.bytes), pos))
+            }
+          case None =>
+            logger.error(s"unknown block hash ${block.blockHeader.hashBE}")
+        }
+      }
     }
     lazy val onHeaders: OnBlockHeadersReceived = { headers =>
       if (headers.isEmpty) {
@@ -330,7 +336,7 @@ class NeutrinoWallet(watcher: Option[ActorRef], bip39PasswordOpt: Option[String]
 object NeutrinoWallet {
   val defaultDatadir: Path = Paths.get(Properties.userHome, ".bitcoin-s")
 
-  def fromDatadir(datadir: Path = defaultDatadir, watcher: Option[ActorRef] = None, overrideConfig: Config = ConfigFactory.empty())(implicit system: ActorSystem): Future[NeutrinoWallet] = {
+  def fromDatadir(datadir: Path = defaultDatadir, initialSyncDone: Option[Promise[Done]] = None, overrideConfig: Config = ConfigFactory.empty())(implicit system: ActorSystem): Future[NeutrinoWallet] = {
     import system.dispatcher
     val segwitConf = ConfigFactory.parseString("bitcoin-s.wallet.defaultAccountType = segwit")
     val sysProps = ConfigFactory.parseProperties(System.getProperties)
@@ -354,7 +360,7 @@ object NeutrinoWallet {
       _ <- chainConf.start()
       _ <- walletConf.start()
       _ <- nodeConf.start()
-      wallet <- new NeutrinoWallet(watcher).start()
+      wallet <- new NeutrinoWallet(initialSyncDone).start()
     } yield wallet
   }
 }
