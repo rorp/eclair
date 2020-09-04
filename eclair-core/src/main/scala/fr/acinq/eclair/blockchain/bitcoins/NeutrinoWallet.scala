@@ -343,11 +343,11 @@ object NeutrinoWallet extends Logging {
     val segwitConf = ConfigFactory.parseString("bitcoin-s.wallet.defaultAccountType = segwit")
     val sysProps = ConfigFactory.parseProperties(System.getProperties)
 
-    implicit val walletConf: WalletAppConfig = WalletAppConfig(datadir, sysProps, segwitConf, networkConf)
+    implicit val walletConf: WalletAppConfig = WalletAppConfig(datadir, sysProps, segwitConf, networkConf, overrideConfig)
 
-    implicit val nodeConf: NodeAppConfig = NodeAppConfig(datadir, sysProps, segwitConf, networkConf)
+    implicit val nodeConf: NodeAppConfig = NodeAppConfig(datadir, sysProps, segwitConf, networkConf, overrideConfig)
 
-    implicit val chainConf: ChainAppConfig = ChainAppConfig(datadir, sysProps, segwitConf, networkConf)
+    implicit val chainConf: ChainAppConfig = ChainAppConfig(datadir, sysProps, segwitConf, networkConf, overrideConfig)
 
     val initialSyncDone: Promise[Done] = if (chainConf.chain.network == RegTest) {
       // don't wait for full sync on regtest
