@@ -136,6 +136,27 @@ class NeutrinoWallet(initialSyncDone: Option[Promise[Done]], bip39PasswordOpt: O
     }
   }
 
+  def getBlockCount(): Future[Int] = {
+    for {
+      chainApi <- chainApiFromDb()
+      count <- chainApi.getBlockCount()
+    } yield count
+  }
+
+  def getFilterHeaderCount(): Future[Int] = {
+    for {
+      chainApi <- chainApiFromDb()
+      count <- chainApi.getFilterHeaderCount()
+    } yield count
+  }
+
+  def getFilterCount(): Future[Int] = {
+    for {
+      chainApi <- chainApiFromDb()
+      count <- chainApi.getFilterCount()
+    } yield count
+  }
+
   def listTransactions(count: Int, skip: Int): Future[List[WalletTransaction]] = {
     for {
       wallet <- startedWalletF
