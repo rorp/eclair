@@ -19,9 +19,10 @@ import org.json4s.JsonAST.JValue
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuiteLike
 
+import scala.concurrent.Await
 import scala.concurrent.duration._
 
-class NeutrinoWatcherSpec extends TestKitBaseClass with AnyFunSuiteLike with BitcoindService with BeforeAndAfterAll with Logging {
+class NeutrinoWatcherSpec extends TestKitBaseClass with AnyFunSuiteLike with NeutrinoService with BeforeAndAfterAll with Logging {
 
   val peerConfig = ConfigFactory.parseString(s"""bitcoin-s.node.peers = ["localhost:${bitcoindPort}"]""")
 
@@ -29,6 +30,7 @@ class NeutrinoWatcherSpec extends TestKitBaseClass with AnyFunSuiteLike with Bit
     logger.info("starting bitcoind")
     startBitcoind()
     waitForBitcoindReady()
+    generateBlocks(bitcoincli, 110)
     super.beforeAll()
   }
 
@@ -39,12 +41,28 @@ class NeutrinoWatcherSpec extends TestKitBaseClass with AnyFunSuiteLike with Bit
     TestKit.shutdownActorSystem(system)
   }
 
+  import  system.dispatcher
+
   test("watch for confirmed transactions") {
+
     val probe = TestProbe()
     val blockCount = new AtomicLong()
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
     val wallet = NeutrinoWallet.fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    val watcher = system.actorOf(Props(new NeutrinoWatcher(blockCount, wallet)))
+
+    val initTip = for {
+      (height, tip) <- wallet.getBestBlockHeader()
+    } yield {
+      logger.info(s"setting blockCount=${height}")
+      blockCount.set(height)
+      tip
+    }
+    initTip.failed.foreach(logger.error("cannot initialize neutrino watcher ", _))
+    val tip = Await.result(initTip, 10 seconds)
+
+    val watcher = system.actorOf(Props(new NeutrinoWatcher(blockCount, tip, wallet)))
+    wallet.sync()
+    waitForNeutrinoSynced(wallet, bitcoincli)
 
     val (address, _) = getNewAddress(bitcoincli)
     val tx = sendToAddress(bitcoincli, address, 1.0)
@@ -63,7 +81,20 @@ class NeutrinoWatcherSpec extends TestKitBaseClass with AnyFunSuiteLike with Bit
     val blockCount = new AtomicLong()
     val datadir: Path = BitcoinSTestAppConfig.tmpDir()
     val wallet = NeutrinoWallet.fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    val watcher = system.actorOf(Props(new NeutrinoWatcher(blockCount, wallet)))
+
+    val initTip = for {
+      (height, tip) <- wallet.getBestBlockHeader()
+    } yield {
+      logger.info(s"setting blockCount=${height}")
+      blockCount.set(height)
+      tip
+    }
+    initTip.failed.foreach(logger.error("cannot initialize neutrino watcher ", _))
+    val tip = Await.result(initTip, 10 seconds)
+
+    val watcher = system.actorOf(Props(new NeutrinoWatcher(blockCount, tip, wallet)))
+    wallet.sync()
+    waitForNeutrinoSynced(wallet, bitcoincli)
 
     val (address, priv) = getNewAddress(bitcoincli)
     val tx = sendToAddress(bitcoincli, address, 1.0)

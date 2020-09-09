@@ -1,31 +1,26 @@
 package fr.acinq.eclair.blockchain.bitcoins
 
-import java.nio.file.Path
-
-import akka.actor.{ActorRef, ActorSystem}
 import akka.pattern.pipe
 import akka.testkit.{TestKit, TestProbe}
 import com.typesafe.config.ConfigFactory
 import fr.acinq.bitcoin.{Block, Btc, Satoshi, Transaction, TxOut}
+import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet
 import fr.acinq.eclair.blockchain.bitcoind.BitcoinCoreWallet.{FundTransactionResponse, SignTransactionResponse}
 import fr.acinq.eclair.blockchain.bitcoind.BitcoindService.BitcoinReq
-import fr.acinq.eclair.blockchain.bitcoind.{BitcoinCoreWallet, BitcoindService}
 import fr.acinq.eclair.blockchain.fee.FeeratePerKw
 import fr.acinq.eclair.blockchain.{MakeFundingTxResponse, OnChainBalance}
 import fr.acinq.eclair.{LongToBtcAmount, TestKitBaseClass}
-import grizzled.slf4j.Logging
 import org.bitcoins.core.protocol.BitcoinAddress
-import org.bitcoins.testkit.BitcoinSTestAppConfig
-import org.json4s.JsonAST.{JDecimal, JInt, JObject, JString}
+import org.json4s.JsonAST.{JDecimal, JString}
 import org.json4s.{DefaultFormats, JValue}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuiteLike
 
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.duration.{DurationInt, FiniteDuration}
+import scala.concurrent.duration.DurationInt
 
 
-class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyFunSuiteLike with BeforeAndAfterAll with Logging {
+class NeutrinoWalletSpec extends TestKitBaseClass with NeutrinoService with AnyFunSuiteLike with BeforeAndAfterAll {
 
   val peerConfig = ConfigFactory.parseString(s"""bitcoin-s.node.peers = ["localhost:${bitcoindPort}"]""")
 
@@ -52,10 +47,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
   }
 
   test("process a block") {
-    val datadir: Path = BitcoinSTestAppConfig.tmpDir()
-    val wallet = NeutrinoWallet
-      .fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    waitForNeutrinoSynced(wallet)
+    val wallet = newWallet(bitcoincli)
 
     wallet.getBalance.pipeTo(sender.ref)
     assert(sender.expectMsgType[OnChainBalance] == OnChainBalance(0 sat, 0 sat))
@@ -73,10 +65,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
 
 
   test("receive funds") {
-    val datadir: Path = BitcoinSTestAppConfig.tmpDir()
-    val wallet = NeutrinoWallet
-      .fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    waitForNeutrinoSynced(wallet)
+    val wallet = newWallet(bitcoincli)
 
     wallet.getBalance.pipeTo(sender.ref)
     val balance = sender.expectMsgType[OnChainBalance]
@@ -102,7 +91,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
 
     awaitAssert({
       generateBlocks(bitcoincli, 1)
-      waitForNeutrinoSynced(wallet)
+      waitForNeutrinoSynced(wallet, bitcoincli)
 
       wallet.getBalance.pipeTo(sender.ref)
       val balance1 = sender.expectMsgType[OnChainBalance]
@@ -112,10 +101,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
   }
 
   test("handle transactions with identical outputs to us") {
-    val datadir: Path = BitcoinSTestAppConfig.tmpDir()
-    val wallet = NeutrinoWallet
-      .fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    waitForNeutrinoSynced(wallet)
+    val wallet = newWallet(bitcoincli)
 
     wallet.getBalance.pipeTo(sender.ref)
     val balance = sender.expectMsgType[OnChainBalance]
@@ -146,7 +132,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
     awaitAssert({
       // gen to junk address
       generateBlocks(bitcoincli, 1, Some("2NFyxovf6MyxfHqtVjstGzs6HeLqv92Nq4U"))
-      waitForNeutrinoSynced(wallet)
+      waitForNeutrinoSynced(wallet, bitcoincli)
 
       wallet.getBalance.pipeTo(sender.ref)
       val balance1 = sender.expectMsgType[OnChainBalance]
@@ -155,13 +141,10 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
   }
 
   test("send money to someone else (we broadcast)") {
-    val datadir: Path = BitcoinSTestAppConfig.tmpDir()
-    val wallet = NeutrinoWallet
-      .fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    waitForNeutrinoSynced(wallet)
+    val wallet = newWallet(bitcoincli)
 
     // send money to our wallet
-    fundWallet(wallet, 2.0)
+    fundWallet(wallet, bitcoincli, 2.0)
 
     // create a tx that sends money to Bitcoin Core's address
     sender.send(bitcoincli, BitcoinReq("getnewaddress"))
@@ -178,7 +161,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
 
     awaitAssert({
       generateBlocks(bitcoincli, 1, Some("2NFyxovf6MyxfHqtVjstGzs6HeLqv92Nq4U"))
-      waitForNeutrinoSynced(wallet)
+      waitForNeutrinoSynced(wallet, bitcoincli)
 
       sender.send(bitcoincli, BitcoinReq("getreceivedbyaddress", address))
       val JDecimal(value) = sender.expectMsgType[JValue]
@@ -188,13 +171,10 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
   }
 
   test("send money to ourselves (we broadcast)") {
-    val datadir: Path = BitcoinSTestAppConfig.tmpDir()
-    val wallet = NeutrinoWallet
-      .fromDatadir(datadir, Block.RegtestGenesisBlock.hash, overrideConfig = peerConfig)
-    waitForNeutrinoSynced(wallet)
+    val wallet = newWallet(bitcoincli)
 
     // send money to our wallet
-    fundWallet(wallet, 2.0)
+    fundWallet(wallet, bitcoincli, 2.0)
 
     wallet.getBalance.pipeTo(sender.ref)
     val balance = sender.expectMsgType[OnChainBalance]
@@ -215,7 +195,7 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
 
     awaitCond({
       generateBlocks(bitcoincli, 1)
-      waitForNeutrinoSynced(wallet)
+      waitForNeutrinoSynced(wallet, bitcoincli)
 
       wallet.getBalance.pipeTo(sender.ref)
       val balance1 = sender.expectMsgType[OnChainBalance]
@@ -224,56 +204,4 @@ class NeutrinoWalletSpec extends TestKitBaseClass with BitcoindService with AnyF
     }, max = 10 seconds, interval = 1 second)
   }
 
-  def fundWallet(wallet: NeutrinoWallet, amountBtc: Double): Unit = {
-    wallet.getBalance.pipeTo(sender.ref)
-    val balance = sender.expectMsgType[OnChainBalance]
-    logger.debug(s"initial balance: $balance")
-
-    // send money to our wallet
-    wallet.getReceiveAddress.pipeTo(sender.ref)
-    val a = sender.expectMsgType[String]
-    logger.debug(s"sending 2 btc to $a")
-    sender.send(bitcoincli, BitcoinReq("sendtoaddress", a, amountBtc))
-    val JString(txid) = sender.expectMsgType[JString]
-    logger.debug(txid)
-
-    awaitAssert({
-      generateBlocks(bitcoincli, 1)
-      waitForNeutrinoSynced(wallet)
-
-      wallet.getBalance.pipeTo(sender.ref)
-      val balance1 = sender.expectMsgType[OnChainBalance]
-      logger.debug(s"cur balance: $balance1")
-      assert(balance1.confirmed + balance1.unconfirmed == balance.confirmed + balance.unconfirmed + (amountBtc * 100000000).toInt.sat)
-    }, max = 10 seconds, interval = 1 second)
-  }
-
-  def getBestHeight(bitcoinCli: ActorRef, timeout: FiniteDuration = 10 seconds)(implicit system: ActorSystem): Int = {
-    val sender = TestProbe()
-    sender.send(bitcoinCli, BitcoinReq("getbestblockhash"))
-    val JString(blockHash) = sender.expectMsgType[JValue](timeout)
-    sender.send(bitcoinCli, BitcoinReq("getblock", blockHash))
-    val JObject(block) = sender.expectMsgType[JValue](timeout)
-    val height_opt = block.collectFirst { case ("height", JInt(height)) => height }
-    assert(height_opt.nonEmpty)
-    height_opt.get.toInt
-  }
-
-  def waitForNeutrinoSynced(wallet: NeutrinoWallet): Unit = {
-    awaitCond({
-      (for {
-        bestHeight <- wallet.getFilterCount()
-      } yield bestHeight).pipeTo(sender.ref)
-      val walletBestHeight = sender.expectMsgType[Int]
-
-      val networkBestHeight = getBestHeight(bitcoincli)
-
-      logger.debug(s"$walletBestHeight $networkBestHeight")
-
-      val res = walletBestHeight == networkBestHeight
-      Thread.sleep(500)
-      res
-    }, max = 10 seconds, interval = 1 second)
-
-  }
 }

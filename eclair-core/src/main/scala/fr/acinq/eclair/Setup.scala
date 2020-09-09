@@ -267,7 +267,16 @@ class Setup(datadir: File,
         case Neutrino(neutrinoWallet) =>
           zmqBlockConnected.success(Done)
           zmqTxConnected.success(Done)
-          system.actorOf(SimpleSupervisor.props(Props(new NeutrinoWatcher(blockCount, neutrinoWallet)), "watcher", SupervisorStrategy.Resume))
+          val initTip = for {
+            (height, tip) <- neutrinoWallet.getBestBlockHeader()
+          } yield {
+            logger.info(s"setting blockCount=${height}")
+            blockCount.set(height)
+            tip
+          }
+          initTip.failed.foreach(logger.error("cannot initialize neutrino watcher ", _))
+          val tip = Await.result(initTip, 10 seconds)
+          system.actorOf(SimpleSupervisor.props(Props(new NeutrinoWatcher(blockCount, tip, neutrinoWallet)), "watcher", SupervisorStrategy.Resume))
       }
 
       router = system.actorOf(SimpleSupervisor.props(Router.props(nodeParams, watcher, Some(routerInitialized)), "router", SupervisorStrategy.Resume))
@@ -275,7 +284,9 @@ class Setup(datadir: File,
       _ <- Future.firstCompletedOf(routerInitialized.future :: routerTimeout :: Nil)
 
       wallet = bitcoin match {
-        case Neutrino(neutrinoWallet) => neutrinoWallet
+        case Neutrino(neutrinoWallet) =>
+          Await.result(neutrinoWallet.sync(), Duration.Inf)
+          neutrinoWallet
         case Bitcoind(bitcoinClient) => new BitcoinCoreWallet(bitcoinClient)
         case Electrum(electrumClient) =>
           val sqlite = DriverManager.getConnection(s"jdbc:sqlite:${new File(chaindir, "wallet.sqlite")}")

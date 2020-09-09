@@ -104,8 +104,6 @@ class NeutrinoWallet(initialSyncDone: Option[Promise[Done]], bip39PasswordOpt: O
     wallet <- configuredWalletF
     _ <- node.start()
     _ <- wallet.start()
-    _ <- node.sync()
-    //    _ <- wallet.rescanNeutrinoWallet(startOpt = None, endOpt = None, addressBatchSize = 20, useCreationTime = true)
   } yield {
     sys.addShutdownHook {
       wallet.stop()
@@ -120,6 +118,14 @@ class NeutrinoWallet(initialSyncDone: Option[Promise[Done]], bip39PasswordOpt: O
   startedWalletF.failed.foreach { err =>
     logger.error(s"Error on Neutrino wallet startup!", err)
   }
+
+  def sync(): Future[Unit] =  for {
+    node <- configuredNodeF
+    _ <- node.sync()
+    _ <- initialSyncDone.getOrElse(Promise.successful(Done)).future
+  } yield ()
+
+  def rescan(): Future[Unit] = configuredWalletF.flatMap(_.rescanNeutrinoWallet(startOpt = None, endOpt = None, addressBatchSize = 20, useCreationTime = true))
 
   def getBlockHeight(blockHash: DoubleSha256DigestBE): Future[Option[Int]] =
     chainApiFromDb().flatMap(_.getBlockHeight(blockHash))
@@ -382,7 +388,6 @@ object NeutrinoWallet extends Logging {
       _ <- walletConf.start()
       _ <- nodeConf.start()
       started <- new NeutrinoWallet(Some(initialSyncDone)).start()
-      _ <- initialSyncDone.future
     } yield started
 
     Await.result(wallet, Duration.Inf)

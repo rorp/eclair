@@ -11,27 +11,18 @@ import fr.acinq.eclair.transactions.Scripts
 import fr.acinq.eclair.{LongToBtcAmount, ShortChannelId, TxCoordinates}
 
 import scala.collection.immutable.{Queue, SortedMap}
-import scala.concurrent.duration.DurationInt
-import scala.concurrent.{Await, ExecutionContext}
+import scala.concurrent.ExecutionContext
 
+// @formatter:off
 sealed trait NeutrinoEvent
 case class BestBlockHeader(height: Int, blockHeader: BlockHeader) extends NeutrinoEvent
 case class BlockHeaderConnected(height: Int, blockHeader: BlockHeader) extends NeutrinoEvent
 case class TransactionProcessed(height: Int, tx: Transaction, blockHash: ByteVector32, pos: Int) extends NeutrinoEvent
+// @formatter:on
 
-class NeutrinoWatcher(blockCount: AtomicLong, wallet: NeutrinoWallet)(implicit ec: ExecutionContext = ExecutionContext.global) extends Actor with Stash with ActorLogging {
+class NeutrinoWatcher(blockCount: AtomicLong, initialTip: BlockHeader, wallet: NeutrinoWallet)(implicit ec: ExecutionContext = ExecutionContext.global) extends Actor with Stash with ActorLogging {
 
   context.system.eventStream.subscribe(self, classOf[NeutrinoEvent])
-
-  val init = for {
-    (height, tip) <- wallet.getBestBlockHeader()
-  } yield  {
-    log.info(s"setting blockCount=${height}")
-    blockCount.set(height)
-    self ! BestBlockHeader(height, tip)
-  }
-  init.failed.foreach(log.error("cannot initialize neutrino watcher ", _))
-  Await.result(init, 10 seconds)
 
   override def unhandled(message: Any): Unit = message match {
     case ValidateRequest(c) =>
@@ -48,12 +39,7 @@ class NeutrinoWatcher(blockCount: AtomicLong, wallet: NeutrinoWallet)(implicit e
     case _ => log.warning(s"unhandled message $message")
   }
 
-  override def receive: Receive = uninitialized()
-
-  def uninitialized(): Receive = {
-    case BestBlockHeader(height, tip) =>
-      context.become(running(height, tip, Set.empty, Map.empty, SortedMap.empty, Queue.empty))
-  }
+  override def receive: Receive = running(blockCount.get().toInt, initialTip, Set.empty, Map.empty, SortedMap.empty, Queue.empty)
 
   def running(height: Int, tip: BlockHeader, watches: Set[Watch], scriptHashStatus: Map[ByteVector32, String], block2tx: SortedMap[Long, Seq[Transaction]], sent: Queue[Transaction]): Receive = {
     case BlockHeaderConnected(_, newtip) if tip == newtip => ()
