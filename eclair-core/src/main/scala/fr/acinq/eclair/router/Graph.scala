@@ -250,6 +250,7 @@ object Graph {
             edge.balance_opt.forall(current.weight.amount <= _) &&
             edge.params.htlcMaximum_opt.forall(current.weight.amount <= _) &&
             current.weight.amount >= edge.params.htlcMinimum &&
+            edge.params.inboundFees_opt.forall(i => i.feeBase.toLong <= 0 && i.feeProportionalMillionths <= 0) &&
             !ignoredEdges.contains(edge.desc) &&
             !ignoredVertices.contains(neighbor)) {
             // NB: this contains the amount (including fees) that will need to be sent to `neighbor`, but the amount that
@@ -306,7 +307,7 @@ object Graph {
     val totalCltv = prev.cltv + cltv
     val richWeight = weightRatios match {
       case Left(weightRatios) =>
-        val hopCost = if (edge.desc.a == sender) 0 msat else nodeFee(weightRatios.hopCost, prev.amount)
+        val hopCost = if (edge.desc.a == sender) 0 msat else nodeFee(weightRatios.hopCost, prev.amount, None)
         import RoutingHeuristics._
 
         // Every edge is weighted by funding block height where older blocks add less weight. The window considered is 1 year.
@@ -332,7 +333,7 @@ object Graph {
         val totalWeight = prev.weight + (fee + hopCost).toLong * factor
         RichWeight(totalAmount, prev.length + 1, totalCltv, 1.0, totalFees, 0 msat, totalWeight)
       case Right(heuristicsConstants) =>
-        val hopCost = nodeFee(heuristicsConstants.hopCost, prev.amount)
+        val hopCost = nodeFee(heuristicsConstants.hopCost, prev.amount, None)
         val totalHopsCost = prev.virtualFees + hopCost
         // If we know the balance of the channel, then we will check separately that it can relay the payment.
         val successProbability = if (edge.balance_opt.nonEmpty) 1.0 else 1.0 - prev.amount.toLong.toDouble / edge.capacity.toMilliSatoshi.toLong.toDouble
@@ -340,7 +341,7 @@ object Graph {
           throw NegativeProbability(edge, prev, heuristicsConstants)
         }
         val totalSuccessProbability = prev.successProbability * successProbability
-        val failureCost = nodeFee(heuristicsConstants.failureCost, totalAmount)
+        val failureCost = nodeFee(heuristicsConstants.failureCost, totalAmount, None)
         if (heuristicsConstants.useLogProbability) {
           val riskCost = totalAmount.toLong * cltv.toInt * heuristicsConstants.lockedFundsRisk
           val weight = prev.weight + fee.toLong + hopCost.toLong + riskCost - failureCost.toLong * math.log(successProbability)

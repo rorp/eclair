@@ -1947,12 +1947,19 @@ object RouteCalculationSpec {
                maxHtlc: Option[MilliSatoshi] = None,
                cltvDelta: CltvExpiryDelta = CltvExpiryDelta(0),
                capacity: Satoshi = DEFAULT_CAPACITY,
-               balance_opt: Option[MilliSatoshi] = None): GraphEdge = {
-    val update = makeUpdateShort(ShortChannelId(shortChannelId), nodeId1, nodeId2, feeBase, feeProportionalMillionth, minHtlc, maxHtlc, cltvDelta)
+               balance_opt: Option[MilliSatoshi] = None,
+               inboundFeeBase_opt: Option[MilliSatoshi] = None,
+               inboundFeeProportionalMillionth_opt: Option[Int] = None): GraphEdge = {
+    val update = makeUpdateShort(ShortChannelId(shortChannelId), nodeId1, nodeId2, feeBase, feeProportionalMillionth, minHtlc, maxHtlc, cltvDelta, inboundFeeBase_opt = inboundFeeBase_opt, inboundFeeProportionalMillionth_opt = inboundFeeProportionalMillionth_opt)
     GraphEdge(ChannelDesc(RealShortChannelId(shortChannelId), nodeId1, nodeId2), HopRelayParams.FromAnnouncement(update), capacity, balance_opt)
   }
 
-  def makeUpdateShort(shortChannelId: ShortChannelId, nodeId1: PublicKey, nodeId2: PublicKey, feeBase: MilliSatoshi, feeProportionalMillionth: Int, minHtlc: MilliSatoshi = DEFAULT_AMOUNT_MSAT, maxHtlc: Option[MilliSatoshi] = None, cltvDelta: CltvExpiryDelta = CltvExpiryDelta(0), timestamp: TimestampSecond = 0 unixsec): ChannelUpdate =
+  def makeUpdateShort(shortChannelId: ShortChannelId, nodeId1: PublicKey, nodeId2: PublicKey, feeBase: MilliSatoshi, feeProportionalMillionth: Int, minHtlc: MilliSatoshi = DEFAULT_AMOUNT_MSAT, maxHtlc: Option[MilliSatoshi] = None, cltvDelta: CltvExpiryDelta = CltvExpiryDelta(0), timestamp: TimestampSecond = 0 unixsec, inboundFeeBase_opt: Option[MilliSatoshi] = None, inboundFeeProportionalMillionth_opt: Option[Int] = None): ChannelUpdate = {
+    val tlvStream: TlvStream[ChannelUpdateTlv] = if (inboundFeeBase_opt.isDefined && inboundFeeProportionalMillionth_opt.isDefined) {
+      TlvStream(ChannelUpdateTlv.Blip18InboundFee(inboundFeeBase_opt.get.toLong.toInt, inboundFeeProportionalMillionth_opt.get))
+    } else {
+      TlvStream.empty
+    }
     ChannelUpdate(
       signature = DUMMY_SIG,
       chainHash = Block.RegtestGenesisBlock.hash,
@@ -1964,8 +1971,10 @@ object RouteCalculationSpec {
       htlcMinimumMsat = minHtlc,
       feeBaseMsat = feeBase,
       feeProportionalMillionths = feeProportionalMillionth,
-      htlcMaximumMsat = maxHtlc.getOrElse(500_000_000 msat)
+      htlcMaximumMsat = maxHtlc.getOrElse(500_000_000 msat),
+      tlvStream = tlvStream
     )
+  }
 
   def hops2Ids(hops: Seq[ChannelHop]): Seq[Long] = hops.map(hop => hop.shortChannelId.toLong)
 

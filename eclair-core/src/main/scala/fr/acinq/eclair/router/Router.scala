@@ -473,7 +473,8 @@ object Router {
     // @formatter:off
     def cltvExpiryDelta: CltvExpiryDelta
     def relayFees: Relayer.RelayFees
-    final def fee(amount: MilliSatoshi): MilliSatoshi = nodeFee(relayFees, amount)
+    def inboundFees_opt: Option[Relayer.InboundFees]
+    final def fee(amount: MilliSatoshi): MilliSatoshi = nodeFee(relayFees, amount, inboundFees_opt)
     def htlcMinimum: MilliSatoshi
     def htlcMaximum_opt: Option[MilliSatoshi]
     // @formatter:on
@@ -484,14 +485,17 @@ object Router {
     case class FromAnnouncement(channelUpdate: ChannelUpdate) extends HopRelayParams {
       override val cltvExpiryDelta = channelUpdate.cltvExpiryDelta
       override val relayFees = channelUpdate.relayFees
+      override val inboundFees_opt = channelUpdate.inboundFees_opt
       override val htlcMinimum = channelUpdate.htlcMinimumMsat
       override val htlcMaximum_opt = Some(channelUpdate.htlcMaximumMsat)
+
     }
 
     /** We learnt about this hop from hints in an invoice. */
     case class FromHint(extraHop: Invoice.ExtraEdge) extends HopRelayParams {
       override val cltvExpiryDelta = extraHop.cltvExpiryDelta
       override val relayFees = extraHop.relayFees
+      override val inboundFees_opt = extraHop.inboundFees_opt
       override val htlcMinimum = extraHop.htlcMinimum
       override val htlcMaximum_opt = extraHop.htlcMaximum_opt
     }
@@ -499,6 +503,7 @@ object Router {
     def areSame(a: HopRelayParams, b: HopRelayParams, ignoreHtlcSize: Boolean = false): Boolean =
       a.cltvExpiryDelta == b.cltvExpiryDelta &&
         a.relayFees == b.relayFees &&
+        a.inboundFees_opt == b.inboundFees_opt &&
         (ignoreHtlcSize || (a.htlcMinimum == b.htlcMinimum && a.htlcMaximum_opt == b.htlcMaximum_opt))
   }
 

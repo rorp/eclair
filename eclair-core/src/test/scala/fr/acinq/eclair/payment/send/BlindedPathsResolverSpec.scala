@@ -110,8 +110,8 @@ class BlindedPathsResolverSpec extends ScalaTestWithActorTestKit(ConfigFactory.l
     val probe = TestProbe()
     val nextNodeId = randomKey().publicKey
     val edges = Seq(
-      ExtraEdge(nodeParams.nodeId, nextNodeId, RealShortChannelId(BlockHeight(750_000), 3, 7), 600_000 msat, 100, CltvExpiryDelta(144), 1 msat, None),
-      ExtraEdge(nextNodeId, randomKey().publicKey, RealShortChannelId(BlockHeight(700_000), 1, 0), 750_000 msat, 150, CltvExpiryDelta(48), 1 msat, None),
+      ExtraEdge(nodeParams.nodeId, nextNodeId, RealShortChannelId(BlockHeight(750_000), 3, 7), 600_000 msat, 100, CltvExpiryDelta(144), 1 msat, None, None),
+      ExtraEdge(nextNodeId, randomKey().publicKey, RealShortChannelId(BlockHeight(700_000), 1, 0), 750_000 msat, 150, CltvExpiryDelta(48), 1 msat, None, None),
     )
     val hops = edges.map(e => ChannelHop(e.shortChannelId, e.sourceNodeId, e.targetNodeId, HopRelayParams.FromHint(e)))
     val route = BlindedRouteCreation.createBlindedRouteFromHops(hops, hex"deadbeef", 1 msat, CltvExpiry(800_000)).route
@@ -156,7 +156,7 @@ class BlindedPathsResolverSpec extends ScalaTestWithActorTestKit(ConfigFactory.l
 
     val probe = TestProbe()
     val walletNodeId = randomKey().publicKey
-    val edge = ExtraEdge(nodeParams.nodeId, walletNodeId, Alias(561), 5_000_000 msat, 200, CltvExpiryDelta(144), 1 msat, None)
+    val edge = ExtraEdge(nodeParams.nodeId, walletNodeId, Alias(561), 5_000_000 msat, 200, CltvExpiryDelta(144), 1 msat, None, None)
     val hop = ChannelHop(edge.shortChannelId, nodeParams.nodeId, walletNodeId, HopRelayParams.FromHint(edge))
     val route = BlindedRouteCreation.createBlindedRouteToWallet(hop, hex"deadbeef", 1 msat, CltvExpiry(800_000)).route
     val paymentInfo = BlindedRouteCreation.aggregatePaymentInfo(100_000_000 msat, Seq(hop), CltvExpiryDelta(12))
@@ -181,7 +181,7 @@ class BlindedPathsResolverSpec extends ScalaTestWithActorTestKit(ConfigFactory.l
 
     val probe = TestProbe()
     val scid = RealShortChannelId(BlockHeight(750_000), 3, 7)
-    val edge = ExtraEdge(nodeParams.nodeId, randomKey().publicKey, scid, 600_000 msat, 100, CltvExpiryDelta(144), 1 msat, None)
+    val edge = ExtraEdge(nodeParams.nodeId, randomKey().publicKey, scid, 600_000 msat, 100, CltvExpiryDelta(144), 1 msat, None, None)
     val hop = ChannelHop(edge.shortChannelId, edge.sourceNodeId, edge.targetNodeId, HopRelayParams.FromHint(edge))
     val route = BlindedRouteCreation.createBlindedRouteFromHops(Seq(hop), hex"deadbeef", 1 msat, CltvExpiry(800_000)).route
     val paymentInfo = BlindedRouteCreation.aggregatePaymentInfo(50_000_000 msat, Seq(hop), CltvExpiryDelta(12))
@@ -207,8 +207,8 @@ class BlindedPathsResolverSpec extends ScalaTestWithActorTestKit(ConfigFactory.l
     val probe = TestProbe()
     val scid = RealShortChannelId(BlockHeight(750_000), 3, 7)
     val nextNodeId = randomKey().publicKey
-    val edgeLowFees = ExtraEdge(nodeParams.nodeId, nextNodeId, scid, 100 msat, 5, CltvExpiryDelta(144), 1 msat, None)
-    val edgeLowExpiryDelta = ExtraEdge(nodeParams.nodeId, nextNodeId, scid, 600_000 msat, 100, CltvExpiryDelta(36), 1 msat, None)
+    val edgeLowFees = ExtraEdge(nodeParams.nodeId, nextNodeId, scid, 100 msat, 5, CltvExpiryDelta(144), 1 msat, None, None)
+    val edgeLowExpiryDelta = ExtraEdge(nodeParams.nodeId, nextNodeId, scid, 600_000 msat, 100, CltvExpiryDelta(36), 1 msat, None, None)
     val toResolve = Seq(
       // We don't allow paying blinded routes to ourselves.
       BlindedRouteCreation.createBlindedRouteWithoutHops(nodeParams.nodeId, hex"deadbeef", 1 msat, CltvExpiry(800_000)).route,
