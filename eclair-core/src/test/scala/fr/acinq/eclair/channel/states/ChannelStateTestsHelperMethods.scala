@@ -393,7 +393,7 @@ trait ChannelStateTestsBase extends Assertions with Eventually {
   }
 
   def makeSingleHopRoute(amount: MilliSatoshi, destination: PublicKey): Route = {
-    val dummyParams = HopRelayParams.FromHint(Invoice.ExtraEdge(randomKey().publicKey, destination, ShortChannelId(0), 0 msat, 0, CltvExpiryDelta(0), 0 msat, None, None))
+    val dummyParams = HopRelayParams.FromHint(Invoice.ExtraEdge(randomKey().publicKey, destination, ShortChannelId(0), 0 msat, 0, CltvExpiryDelta(0), 0 msat, None))
     Route(amount, Seq(ChannelHop(ShortChannelId(0), dummyParams.extraHop.sourceNodeId, dummyParams.extraHop.targetNodeId, dummyParams)), None)
   }
 

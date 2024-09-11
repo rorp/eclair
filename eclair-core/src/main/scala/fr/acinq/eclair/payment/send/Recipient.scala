@@ -127,7 +127,7 @@ case class BlindedRecipient(nodeId: PublicKey,
   require(blindedHops.nonEmpty, "blinded routes must be provided")
 
   override val extraEdges = blindedHops.map { h =>
-    ExtraEdge(h.nodeId, nodeId, h.dummyId, h.paymentInfo.feeBase, h.paymentInfo.feeProportionalMillionths, h.paymentInfo.cltvExpiryDelta, h.paymentInfo.minHtlc, Some(h.paymentInfo.maxHtlc), None)
+    ExtraEdge(h.nodeId, nodeId, h.dummyId, h.paymentInfo.feeBase, h.paymentInfo.feeProportionalMillionths, h.paymentInfo.cltvExpiryDelta, h.paymentInfo.minHtlc, Some(h.paymentInfo.maxHtlc))
   }
 
   private def validateRoute(route: Route): Either[OutgoingPaymentError, BlindedHop] = {
@@ -219,7 +219,7 @@ case class TrampolineRecipient(invoice: Invoice,
 
   override val nodeId = invoice.nodeId
   override val features = invoice.features
-  override val extraEdges = Seq(ExtraEdge(trampolineNodeId, nodeId, ShortChannelId.generateLocalAlias(), trampolineFee, 0, trampolineHop.cltvExpiryDelta, 1 msat, None, None))
+  override val extraEdges = Seq(ExtraEdge(trampolineNodeId, nodeId, ShortChannelId.generateLocalAlias(), trampolineFee, 0, trampolineHop.cltvExpiryDelta, 1 msat, None))
 
   private def validateRoute(route: Route): Either[OutgoingPaymentError, NodeHop] = {
     route.finalHop_opt match {

@@ -48,7 +48,7 @@ object Invoice {
                        cltvExpiryDelta: CltvExpiryDelta,
                        htlcMinimum: MilliSatoshi,
                        htlcMaximum_opt: Option[MilliSatoshi],
-                       inboundFees_opt: Option[Relayer.InboundFees]) {
+                       inboundFees_opt: Option[Relayer.InboundFees] = None) {
     val relayFees = Relayer.RelayFees(feeBase, feeProportionalMillionths)
 
     def update(u: ChannelUpdate): ExtraEdge = copy(
