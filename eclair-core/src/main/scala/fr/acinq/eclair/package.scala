@@ -70,9 +70,14 @@ package object eclair {
   def nodeFee(baseFee: MilliSatoshi, proportionalFee: Long, paymentAmount: MilliSatoshi): MilliSatoshi = baseFee + (paymentAmount * proportionalFee) / 1000000
 
   def nodeFee(relayFees: RelayFees, paymentAmount: MilliSatoshi, inboundFees: Option[InboundFees]): MilliSatoshi = {
-    val totalFee = nodeFee(relayFees.feeBase, relayFees.feeProportionalMillionths, paymentAmount) + inboundFees.map { inbound =>
-      nodeFee(inbound.feeBase, inbound.feeProportionalMillionths, paymentAmount)
+    val outFee = nodeFee(relayFees.feeBase, relayFees.feeProportionalMillionths, paymentAmount)
+
+    val inFee = inboundFees.map { inbound =>
+      nodeFee(inbound.feeBase, inbound.feeProportionalMillionths, paymentAmount + outFee)
     }.getOrElse(0 msat)
+
+    val totalFee = outFee + inFee
+
     if (totalFee.toLong < 0) {
       0 msat
     } else {
