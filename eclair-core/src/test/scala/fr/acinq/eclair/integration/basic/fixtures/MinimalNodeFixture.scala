@@ -74,7 +74,7 @@ object MinimalNodeFixture extends Assertions with Eventually with IntegrationPat
         torAddress_opt = None,
         database = TestDatabases.inMemoryDb(),
         blockHeight = new AtomicLong(400_000),
-        feerates = new AtomicReference(FeeratesPerKw.single(FeeratePerKw(253 sat)))
+        bitcoinCoreFeerates = new AtomicReference(FeeratesPerKw.single(FeeratePerKw(253 sat)))
       ).modify(_.alias).setTo(alias)
       .modify(_.chainHash).setTo(Block.RegtestGenesisBlock.hash)
       .modify(_.routerConf.routerBroadcastInterval).setTo(1 second)
@@ -181,7 +181,7 @@ object MinimalNodeFixture extends Assertions with Eventually with IntegrationPat
 
   def openChannel(node1: MinimalNodeFixture, node2: MinimalNodeFixture, funding: Satoshi, channelType_opt: Option[SupportedChannelType] = None)(implicit system: ActorSystem): OpenChannelResponse.Created = {
     val sender = TestProbe("sender")
-    sender.send(node1.switchboard, Peer.OpenChannel(node2.nodeParams.nodeId, funding, channelType_opt, None, None, None, None, None))
+    sender.send(node1.switchboard, Peer.OpenChannel(node2.nodeParams.nodeId, funding, channelType_opt, None, None, None, None, None, None))
     sender.expectMsgType[OpenChannelResponse.Created]
   }
 

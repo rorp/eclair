@@ -28,11 +28,11 @@ import fr.acinq.eclair._
 import fr.acinq.eclair.blockchain.bitcoind.ZmqWatcher._
 import fr.acinq.eclair.blockchain.fee.{FeeratePerKw, FeeratesPerKw}
 import fr.acinq.eclair.blockchain.{DummyOnChainWallet, OnChainWallet, OnchainPubkeyCache, SingleKeyOnChainWallet}
+import fr.acinq.eclair.channel._
 import fr.acinq.eclair.channel.fsm.Channel
 import fr.acinq.eclair.channel.publish.TxPublisher
 import fr.acinq.eclair.channel.publish.TxPublisher.PublishReplaceableTx
 import fr.acinq.eclair.channel.states.ChannelStateTestsBase.FakeTxPublisherFactory
-import fr.acinq.eclair.channel._
 import fr.acinq.eclair.payment.send.SpontaneousRecipient
 import fr.acinq.eclair.payment.{Invoice, OutgoingPaymentPacket}
 import fr.acinq.eclair.router.Router.{ChannelHop, HopRelayParams, Route}
@@ -51,8 +51,8 @@ object ChannelStateTestsTags {
   val DisableWumbo = "disable_wumbo"
   /** If set, channels will use option_dual_fund. */
   val DualFunding = "dual_funding"
-  /** If set, peers will support splicing. */
-  val Splicing = "splicing"
+  /** If set, a liquidity ads will be used when opening a channel. */
+  val LiquidityAds = "liquidity_ads"
   /** If set, channels will use option_static_remotekey. */
   val StaticRemoteKey = "static_remotekey"
   /** If set, channels will use option_anchor_outputs. */
@@ -91,8 +91,6 @@ object ChannelStateTestsTags {
   val RejectRbfAttempts = "reject_rbf_attempts"
   /** If set, the non-initiator will require a 1-block delay between RBF attempts. */
   val DelayRbfAttempts = "delay_rbf_attempts"
-  /** If set, peers will support the quiesce protocol. */
-  val Quiescence = "quiescence"
   /** If set, channels will adapt their max HTLC amount to the available balance */
   val AdaptMaxHtlcAmount = "adapt-max-htlc-amount"
 }
@@ -163,7 +161,7 @@ trait ChannelStateTestsBase extends Assertions with Eventually {
       .modify(_.channelConf.balanceThresholds).setToIf(tags.contains(ChannelStateTestsTags.AdaptMaxHtlcAmount))(Seq(Channel.BalanceThreshold(1_000 sat, 0 sat), Channel.BalanceThreshold(5_000 sat, 1_000 sat), Channel.BalanceThreshold(10_000 sat, 5_000 sat)))
     val wallet = wallet_opt match {
       case Some(wallet) => wallet
-      case None => if (tags.contains(ChannelStateTestsTags.DualFunding) || tags.contains(ChannelStateTestsTags.Splicing)) new SingleKeyOnChainWallet() else new DummyOnChainWallet()
+      case None => if (tags.contains(ChannelStateTestsTags.DualFunding)) new SingleKeyOnChainWallet() else new DummyOnChainWallet()
     }
     val alice: TestFSMRef[ChannelState, ChannelData, Channel] = {
       implicit val system: ActorSystem = systemA
@@ -190,8 +188,6 @@ trait ChannelStateTestsBase extends Assertions with Eventually {
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.ZeroConf))(_.updated(Features.ZeroConf, FeatureSupport.Optional))
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.ScidAlias))(_.updated(Features.ScidAlias, FeatureSupport.Optional))
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.DualFunding))(_.updated(Features.DualFunding, FeatureSupport.Optional))
-      .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.Splicing))(_.updated(Features.SplicePrototype, FeatureSupport.Optional))
-      .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.Quiescence))(_.updated(Features.Quiescence, FeatureSupport.Optional))
       .initFeatures()
     val bobInitFeatures = Bob.nodeParams.features
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.DisableWumbo))(_.removed(Features.Wumbo))
@@ -204,8 +200,6 @@ trait ChannelStateTestsBase extends Assertions with Eventually {
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.ZeroConf))(_.updated(Features.ZeroConf, FeatureSupport.Optional))
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.ScidAlias))(_.updated(Features.ScidAlias, FeatureSupport.Optional))
       .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.DualFunding))(_.updated(Features.DualFunding, FeatureSupport.Optional))
-      .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.Splicing))(_.updated(Features.SplicePrototype, FeatureSupport.Optional))
-      .modify(_.activated).usingIf(tags.contains(ChannelStateTestsTags.Quiescence))(_.updated(Features.Quiescence, FeatureSupport.Optional))
       .initFeatures()
 
     val channelType = ChannelTypes.defaultFromFeatures(aliceInitFeatures, bobInitFeatures, announceChannel = channelFlags.announceChannel)
@@ -244,20 +238,31 @@ trait ChannelStateTestsBase extends Assertions with Eventually {
     val channelFlags = ChannelFlags(announceChannel = tags.contains(ChannelStateTestsTags.ChannelsPublic))
     val (aliceParams, bobParams, channelType) = computeFeatures(setup, tags, channelFlags)
     val commitTxFeerate = if (tags.contains(ChannelStateTestsTags.AnchorOutputs) || tags.contains(ChannelStateTestsTags.AnchorOutputsZeroFeeHtlcTxs)) TestConstants.anchorOutputsFeeratePerKw else TestConstants.feeratePerKw
-    val dualFunded = tags.contains(ChannelStateTestsTags.DualFunding)
     val fundingAmount = TestConstants.fundingSatoshis
     val initiatorPushAmount = if (tags.contains(ChannelStateTestsTags.NoPushAmount)) None else Some(TestConstants.initiatorPushAmount)
     val nonInitiatorPushAmount = if (tags.contains(ChannelStateTestsTags.NonInitiatorPushAmount)) Some(TestConstants.nonInitiatorPushAmount) else None
-    val nonInitiatorFundingAmount = if (dualFunded) Some(TestConstants.nonInitiatorFundingSatoshis) else None
+    val dualFunded = tags.contains(ChannelStateTestsTags.DualFunding)
+    val liquidityAds = tags.contains(ChannelStateTestsTags.LiquidityAds)
+    val requestFunds_opt = if (liquidityAds) {
+      Some(LiquidityAds.RequestFunding(TestConstants.nonInitiatorFundingSatoshis, TestConstants.defaultLiquidityRates.fundingRates.head, LiquidityAds.PaymentDetails.FromChannelBalance))
+    } else {
+      None
+    }
+    val nonInitiatorFunding_opt = if (dualFunded) {
+      val leaseRates_opt = if (liquidityAds) Some(TestConstants.defaultLiquidityRates) else None
+      Some(LiquidityAds.AddFunding(TestConstants.nonInitiatorFundingSatoshis, leaseRates_opt))
+    } else {
+      None
+    }
 
     val eventListener = TestProbe()
     systemA.eventStream.subscribe(eventListener.ref, classOf[TransactionPublished])
 
     val aliceInit = Init(aliceParams.initFeatures)
     val bobInit = Init(bobParams.initFeatures)
-    alice ! INPUT_INIT_CHANNEL_INITIATOR(ByteVector32.Zeroes, fundingAmount, dualFunded, commitTxFeerate, TestConstants.feeratePerKw, fundingTxFeeBudget_opt = None, initiatorPushAmount, requireConfirmedInputs = false, aliceParams, alice2bob.ref, bobInit, channelFlags, channelConfig, channelType, replyTo = aliceOpenReplyTo.ref.toTyped)
+    alice ! INPUT_INIT_CHANNEL_INITIATOR(ByteVector32.Zeroes, fundingAmount, dualFunded, commitTxFeerate, TestConstants.feeratePerKw, fundingTxFeeBudget_opt = None, initiatorPushAmount, requireConfirmedInputs = false, requestFunds_opt, aliceParams, alice2bob.ref, bobInit, channelFlags, channelConfig, channelType, replyTo = aliceOpenReplyTo.ref.toTyped)
     assert(alice2blockchain.expectMsgType[TxPublisher.SetChannelId].channelId == ByteVector32.Zeroes)
-    bob ! INPUT_INIT_CHANNEL_NON_INITIATOR(ByteVector32.Zeroes, nonInitiatorFundingAmount, dualFunded, nonInitiatorPushAmount, bobParams, bob2alice.ref, aliceInit, channelConfig, channelType)
+    bob ! INPUT_INIT_CHANNEL_NON_INITIATOR(ByteVector32.Zeroes, nonInitiatorFunding_opt, dualFunded, nonInitiatorPushAmount, requireConfirmedInputs = false, bobParams, bob2alice.ref, aliceInit, channelConfig, channelType)
     assert(bob2blockchain.expectMsgType[TxPublisher.SetChannelId].channelId == ByteVector32.Zeroes)
 
     val fundingTx = if (!dualFunded) {
@@ -360,10 +365,6 @@ trait ChannelStateTestsBase extends Assertions with Eventually {
     eventually(assert(alice.stateName == NORMAL))
     eventually(assert(bob.stateName == NORMAL))
 
-    val aliceCommitments = alice.stateData.asInstanceOf[DATA_NORMAL].commitments
-    val bobCommitments = bob.stateData.asInstanceOf[DATA_NORMAL].commitments
-    val expectedBalanceBob = (nonInitiatorFundingAmount.getOrElse(0 sat) + initiatorPushAmount.getOrElse(0 msat) - nonInitiatorPushAmount.getOrElse(0 msat) - aliceCommitments.latest.remoteChannelReserve).max(0 msat)
-    assert(bobCommitments.availableBalanceForSend == expectedBalanceBob)
     // x2 because alice and bob share the same relayer
     channelUpdateListener.expectMsgType[LocalChannelUpdate]
     channelUpdateListener.expectMsgType[LocalChannelUpdate]
@@ -646,7 +647,7 @@ object ChannelStateTestsBase {
 
     val nodeParams: NodeParams = channel.underlyingActor.nodeParams
 
-    def setFeerates(feerates: FeeratesPerKw): Unit = channel.underlyingActor.nodeParams.setFeerates(feerates)
+    def setFeerates(feerates: FeeratesPerKw): Unit = channel.underlyingActor.nodeParams.setBitcoinCoreFeerates(feerates)
 
     def setFeerate(feerate: FeeratePerKw): Unit = setFeerates(FeeratesPerKw.single(feerate))
   }

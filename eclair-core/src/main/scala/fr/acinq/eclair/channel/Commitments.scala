@@ -133,9 +133,6 @@ case class ChannelParams(channelId: ByteVector32,
     else Right(remoteScriptPubKey)
   }
 
-  /** If both peers support quiescence, we have to exchange stfu when splicing. */
-  def useQuiescence: Boolean = Features.canUseFeature(localParams.initFeatures, remoteParams.initFeatures, Features.Quiescence)
-
 }
 
 object ChannelParams {
@@ -822,7 +819,7 @@ case class Commitments(params: ChannelParams,
   def localIsQuiescent: Boolean = changes.localChanges.all.isEmpty
   def remoteIsQuiescent: Boolean = changes.remoteChanges.all.isEmpty
   // HTLCs and pending changes are the same for all active commitments, so we don't need to loop through all of them.
-  def isQuiescent: Boolean = (params.useQuiescence || active.head.hasNoPendingHtlcs) && localIsQuiescent && remoteIsQuiescent
+  def isQuiescent: Boolean = localIsQuiescent && remoteIsQuiescent
   def hasNoPendingHtlcsOrFeeUpdate: Boolean = active.head.hasNoPendingHtlcsOrFeeUpdate(changes)
   def hasPendingOrProposedHtlcs: Boolean = active.head.hasPendingOrProposedHtlcs(changes)
   def timedOutOutgoingHtlcs(currentHeight: BlockHeight): Set[UpdateAddHtlc] = active.head.timedOutOutgoingHtlcs(currentHeight)
@@ -854,7 +851,7 @@ case class Commitments(params: ChannelParams,
       return Left(HtlcValueTooSmall(params.channelId, minimum = htlcMinimum, actual = cmd.amount))
     }
 
-    val add = UpdateAddHtlc(channelId, changes.localNextHtlcId, cmd.amount, cmd.paymentHash, cmd.cltvExpiry, cmd.onion, cmd.nextBlindingKey_opt, cmd.confidence)
+    val add = UpdateAddHtlc(channelId, changes.localNextHtlcId, cmd.amount, cmd.paymentHash, cmd.cltvExpiry, cmd.onion, cmd.nextBlindingKey_opt, cmd.confidence, cmd.fundingFee_opt)
     // we increment the local htlc index and add an entry to the origins map
     val changes1 = changes.addLocalProposal(add).copy(localNextHtlcId = changes.localNextHtlcId + 1)
     val originChannels1 = originChannels + (add.id -> cmd.origin)
@@ -1155,6 +1152,10 @@ case class Commitments(params: ChannelParams,
 
   def localFundingSigs(fundingTxId: TxId): Option[TxSignatures] = {
     all.find(_.fundingTxId == fundingTxId).flatMap(_.localFundingStatus.localSigs_opt)
+  }
+  
+  def liquidityPurchase(fundingTxId: TxId): Option[LiquidityAds.PurchaseBasicInfo] = {
+    all.find(_.fundingTxId == fundingTxId).flatMap(_.localFundingStatus.liquidityPurchase_opt)
   }
 
   /**

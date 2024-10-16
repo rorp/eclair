@@ -69,6 +69,8 @@ case class SendOnionMessageResponsePayload(tlvs: TlvStream[OnionMessagePayloadTl
 case class SendOnionMessageResponse(sent: Boolean, failureMessage: Option[String], response: Option[SendOnionMessageResponsePayload])
 // @formatter:on
 
+case class EnableFromFutureHtlcResponse(enabled: Boolean, failureMessage: Option[String])
+
 object SignedMessage {
   def signedBytes(message: ByteVector): ByteVector32 =
     Crypto.hash256(ByteVector("Lightning Signed Message:".getBytes(StandardCharsets.UTF_8)) ++ message)
@@ -114,7 +116,7 @@ trait Eclair {
 
   def nodes(nodeIds_opt: Option[Set[PublicKey]] = None)(implicit timeout: Timeout): Future[Iterable[NodeAnnouncement]]
 
-  def receive(description: Either[String, ByteVector32], amount_opt: Option[MilliSatoshi], expire_opt: Option[Long], fallbackAddress_opt: Option[String], paymentPreimage_opt: Option[ByteVector32])(implicit timeout: Timeout): Future[Bolt11Invoice]
+  def receive(description: Either[String, ByteVector32], amount_opt: Option[MilliSatoshi], expire_opt: Option[Long], fallbackAddress_opt: Option[String], paymentPreimage_opt: Option[ByteVector32], privateChannelIds_opt: Option[List[ByteVector32]])(implicit timeout: Timeout): Future[Bolt11Invoice]
 
   def newAddress(): Future[String]
 
@@ -186,6 +188,8 @@ trait Eclair {
 
   def getDescriptors(account: Long): Descriptors
 
+  def enableFromFutureHtlc(): Future[EnableFromFutureHtlcResponse]
+
   def stop(): Future[Unit]
 }
 
@@ -220,6 +224,7 @@ class EclairImpl(appKit: Kit) extends Eclair with Logging {
         pushAmount_opt = pushAmount_opt,
         fundingTxFeerate_opt = fundingFeerate_opt.map(FeeratePerKw(_)),
         fundingTxFeeBudget_opt = Some(fundingFeeBudget),
+        requestFunding_opt = None,
         channelFlags_opt = announceChannel_opt.map(announceChannel => ChannelFlags(announceChannel = announceChannel)),
         timeout_opt = Some(openTimeout))
       res <- (appKit.switchboard ? open).mapTo[OpenChannelResponse]
@@ -228,14 +233,15 @@ class EclairImpl(appKit: Kit) extends Eclair with Logging {
 
   override def rbfOpen(channelId: ByteVector32, targetFeerate: FeeratePerKw, fundingFeeBudget: Satoshi, lockTime_opt: Option[Long])(implicit timeout: Timeout): Future[CommandResponse[CMD_BUMP_FUNDING_FEE]] = {
     sendToChannelTyped(channel = Left(channelId),
-      cmdBuilder = CMD_BUMP_FUNDING_FEE(_, targetFeerate, fundingFeeBudget, lockTime_opt.getOrElse(appKit.nodeParams.currentBlockHeight.toLong)))
+      cmdBuilder = CMD_BUMP_FUNDING_FEE(_, targetFeerate, fundingFeeBudget, lockTime_opt.getOrElse(appKit.nodeParams.currentBlockHeight.toLong), requestFunding_opt = None))
   }
 
   override def spliceIn(channelId: ByteVector32, amountIn: Satoshi, pushAmount_opt: Option[MilliSatoshi])(implicit timeout: Timeout): Future[CommandResponse[CMD_SPLICE]] = {
     sendToChannelTyped(channel = Left(channelId),
       cmdBuilder = CMD_SPLICE(_,
         spliceIn_opt = Some(SpliceIn(additionalLocalFunding = amountIn, pushAmount = pushAmount_opt.getOrElse(0.msat))),
-        spliceOut_opt = None
+        spliceOut_opt = None,
+        requestFunding_opt = None,
       ))
   }
 
@@ -250,7 +256,8 @@ class EclairImpl(appKit: Kit) extends Eclair with Logging {
     sendToChannelTyped(channel = Left(channelId),
       cmdBuilder = CMD_SPLICE(_,
         spliceIn_opt = None,
-        spliceOut_opt = Some(SpliceOut(amount = amountOut, scriptPubKey = script))
+        spliceOut_opt = Some(SpliceOut(amount = amountOut, scriptPubKey = script)),
+        requestFunding_opt = None,
       ))
   }
 
@@ -330,14 +337,28 @@ class EclairImpl(appKit: Kit) extends Eclair with Logging {
     }
   }
 
-  override def receive(description: Either[String, ByteVector32], amount_opt: Option[MilliSatoshi], expire_opt: Option[Long], fallbackAddress_opt: Option[String], paymentPreimage_opt: Option[ByteVector32])(implicit timeout: Timeout): Future[Bolt11Invoice] = {
+  override def receive(description: Either[String, ByteVector32], amount_opt: Option[MilliSatoshi], expire_opt: Option[Long], fallbackAddress_opt: Option[String], paymentPreimage_opt: Option[ByteVector32], privateChannelIds_opt: Option[List[ByteVector32]])(implicit timeout: Timeout): Future[Bolt11Invoice] = {
     fallbackAddress_opt.foreach { fa =>
+      // If it's not a valid bitcoin address we throw an exception.
       addressToPublicKeyScript(appKit.nodeParams.chainHash, fa) match {
         case Left(failure) => throw new IllegalArgumentException(failure.toString)
         case Right(_) => ()
       }
-    } // if it's not a bitcoin address throws an exception
-    appKit.paymentHandler.toTyped.ask(ref => ReceiveStandardPayment(ref, amount_opt, description, expire_opt, fallbackAddress_opt = fallbackAddress_opt, paymentPreimage_opt = paymentPreimage_opt))
+    }
+    for {
+      routingHints <- getInvoiceRoutingHints(privateChannelIds_opt)
+      invoice <- appKit.paymentHandler.toTyped.ask[Bolt11Invoice](ref => ReceiveStandardPayment(ref, amount_opt, description, expire_opt, routingHints, fallbackAddress_opt, paymentPreimage_opt))
+    } yield invoice
+  }
+
+  private def getInvoiceRoutingHints(privateChannelIds_opt: Option[List[ByteVector32]])(implicit timeout: Timeout): Future[List[List[Bolt11Invoice.ExtraHop]]] = {
+    privateChannelIds_opt match {
+      case Some(channelIds) =>
+        (appKit.router ? GetRouterData).mapTo[Router.Data].map {
+          d => channelIds.flatMap(cid => d.privateChannels.get(cid)).flatMap(_.toIncomingExtraHop).map(hop => hop :: Nil)
+        }
+      case None => Future.successful(Nil)
+    }
   }
 
   override def newAddress(): Future[String] = {
@@ -364,9 +385,9 @@ class EclairImpl(appKit: Kit) extends Eclair with Logging {
   override def sendOnChain(address: String, amount: Satoshi, confirmationTargetOrFeerate: Either[Long, FeeratePerByte]): Future[TxId] = {
     val feeRate = confirmationTargetOrFeerate match {
       case Left(blocks) =>
-        if (blocks < 3) appKit.nodeParams.currentFeerates.fast
-        else if (blocks > 6) appKit.nodeParams.currentFeerates.slow
-        else appKit.nodeParams.currentFeerates.medium
+        if (blocks < 3) appKit.nodeParams.currentBitcoinCoreFeerates.fast
+        else if (blocks > 6) appKit.nodeParams.currentBitcoinCoreFeerates.slow
+        else appKit.nodeParams.currentBitcoinCoreFeerates.medium
       case Right(feeratePerByte) => FeeratePerKw(feeratePerByte)
     }
     appKit.wallet match {
@@ -762,6 +783,16 @@ class EclairImpl(appKit: Kit) extends Eclair with Logging {
   override def getOnChainMasterPubKey(account: Long): String = appKit.nodeParams.onChainKeyManager_opt match {
     case Some(keyManager) => keyManager.masterPubKey(account)
     case _ => throw new RuntimeException("on-chain seed is not configured")
+  }
+
+  override def enableFromFutureHtlc(): Future[EnableFromFutureHtlcResponse] = {
+    appKit.nodeParams.willFundRates_opt match {
+      case Some(willFundRates) if willFundRates.paymentTypes.contains(LiquidityAds.PaymentType.FromFutureHtlc) =>
+        appKit.nodeParams.onTheFlyFundingConfig.enableFromFutureHtlc()
+        Future.successful(EnableFromFutureHtlcResponse(appKit.nodeParams.onTheFlyFundingConfig.isFromFutureHtlcAllowed, None))
+      case _ =>
+        Future.successful(EnableFromFutureHtlcResponse(enabled = false, Some("could not enable from_future_htlc: you must add it to eclair.liquidity-ads.payment-types in your eclair.conf file first")))
+    }
   }
 
   override def stop(): Future[Unit] = {

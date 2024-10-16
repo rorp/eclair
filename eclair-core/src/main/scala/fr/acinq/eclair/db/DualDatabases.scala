@@ -9,6 +9,7 @@ import fr.acinq.eclair.db.Databases.{FileBackup, PostgresDatabases, SqliteDataba
 import fr.acinq.eclair.db.DbEventHandler.ChannelEvent
 import fr.acinq.eclair.db.DualDatabases.runAsync
 import fr.acinq.eclair.payment._
+import fr.acinq.eclair.payment.relay.OnTheFlyFunding
 import fr.acinq.eclair.payment.relay.Relayer.RelayFees
 import fr.acinq.eclair.router.Router
 import fr.acinq.eclair.wire.protocol.{ChannelAnnouncement, ChannelUpdate, NodeAddress, NodeAnnouncement}
@@ -30,16 +31,12 @@ import scala.util.{Failure, Success, Try}
 case class DualDatabases(primary: Databases, secondary: Databases) extends Databases with FileBackup {
 
   override val network: NetworkDb = DualNetworkDb(primary.network, secondary.network)
-
   override val audit: AuditDb = DualAuditDb(primary.audit, secondary.audit)
-
   override val channels: ChannelsDb = DualChannelsDb(primary.channels, secondary.channels)
-
   override val peers: PeersDb = DualPeersDb(primary.peers, secondary.peers)
-
   override val payments: PaymentsDb = DualPaymentsDb(primary.payments, secondary.payments)
-
   override val pendingCommands: PendingCommandsDb = DualPendingCommandsDb(primary.pendingCommands, secondary.pendingCommands)
+  override val liquidity: LiquidityDb = DualLiquidityDb(primary.liquidity, secondary.liquidity)
 
   /** if one of the database supports file backup, we use it */
   override def backup(backupFile: File): Unit = (primary, secondary) match {
@@ -410,4 +407,75 @@ case class DualPendingCommandsDb(primary: PendingCommandsDb, secondary: PendingC
     runAsync(secondary.listSettlementCommands())
     primary.listSettlementCommands()
   }
+}
+
+case class DualLiquidityDb(primary: LiquidityDb, secondary: LiquidityDb) extends LiquidityDb {
+
+  private implicit val ec: ExecutionContext = ExecutionContext.fromExecutor(Executors.newSingleThreadExecutor(new ThreadFactoryBuilder().setNameFormat("db-liquidity").build()))
+
+  override def addPurchase(liquidityPurchase: ChannelLiquidityPurchased): Unit = {
+    runAsync(secondary.addPurchase(liquidityPurchase))
+    primary.addPurchase(liquidityPurchase)
+  }
+
+  override def setConfirmed(remoteNodeId: PublicKey, txId: TxId): Unit = {
+    runAsync(secondary.setConfirmed(remoteNodeId, txId))
+    primary.setConfirmed(remoteNodeId, txId)
+  }
+
+  override def listPurchases(remoteNodeId: PublicKey): Seq[LiquidityPurchase] = {
+    runAsync(secondary.listPurchases(remoteNodeId))
+    primary.listPurchases(remoteNodeId)
+  }
+
+  override def addPendingOnTheFlyFunding(remoteNodeId: PublicKey, pending: OnTheFlyFunding.Pending): Unit = {
+    runAsync(secondary.addPendingOnTheFlyFunding(remoteNodeId, pending))
+    primary.addPendingOnTheFlyFunding(remoteNodeId, pending)
+  }
+
+  override def removePendingOnTheFlyFunding(remoteNodeId: PublicKey, paymentHash: ByteVector32): Unit = {
+    runAsync(secondary.removePendingOnTheFlyFunding(remoteNodeId, paymentHash))
+    primary.removePendingOnTheFlyFunding(remoteNodeId, paymentHash)
+  }
+
+  override def listPendingOnTheFlyFunding(remoteNodeId: PublicKey): Map[ByteVector32, OnTheFlyFunding.Pending] = {
+    runAsync(secondary.listPendingOnTheFlyFunding(remoteNodeId))
+    primary.listPendingOnTheFlyFunding(remoteNodeId)
+  }
+
+  override def listPendingOnTheFlyFunding(): Map[PublicKey, Map[ByteVector32, OnTheFlyFunding.Pending]] = {
+    runAsync(secondary.listPendingOnTheFlyFunding())
+    primary.listPendingOnTheFlyFunding()
+  }
+
+  override def listPendingOnTheFlyPayments(): Map[PublicKey, Set[ByteVector32]] = {
+    runAsync(secondary.listPendingOnTheFlyPayments())
+    primary.listPendingOnTheFlyPayments()
+  }
+
+  override def addOnTheFlyFundingPreimage(preimage: ByteVector32): Unit = {
+    runAsync(secondary.addOnTheFlyFundingPreimage(preimage))
+    primary.addOnTheFlyFundingPreimage(preimage)
+  }
+
+  override def getOnTheFlyFundingPreimage(paymentHash: ByteVector32): Option[ByteVector32] = {
+    runAsync(secondary.getOnTheFlyFundingPreimage(paymentHash))
+    primary.getOnTheFlyFundingPreimage(paymentHash)
+  }
+
+  override def addFeeCredit(nodeId: PublicKey, amount: MilliSatoshi, receivedAt: TimestampMilli): MilliSatoshi = {
+    runAsync(secondary.addFeeCredit(nodeId, amount, receivedAt))
+    primary.addFeeCredit(nodeId, amount, receivedAt)
+  }
+
+  override def getFeeCredit(nodeId: PublicKey): MilliSatoshi = {
+    runAsync(secondary.getFeeCredit(nodeId))
+    primary.getFeeCredit(nodeId)
+  }
+
+  override def removeFeeCredit(nodeId: PublicKey, amountUsed: MilliSatoshi): MilliSatoshi = {
+    runAsync(secondary.removeFeeCredit(nodeId, amountUsed))
+    primary.removeFeeCredit(nodeId, amountUsed)
+  }
+
 }

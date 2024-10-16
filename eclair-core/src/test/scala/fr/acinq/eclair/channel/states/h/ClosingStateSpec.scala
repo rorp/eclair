@@ -75,9 +75,9 @@ class ClosingStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with
         val (aliceParams, bobParams, channelType) = computeFeatures(setup, test.tags, channelFlags)
         val aliceInit = Init(aliceParams.initFeatures)
         val bobInit = Init(bobParams.initFeatures)
-        alice ! INPUT_INIT_CHANNEL_INITIATOR(ByteVector32.Zeroes, TestConstants.fundingSatoshis, dualFunded = false, TestConstants.feeratePerKw, TestConstants.feeratePerKw, fundingTxFeeBudget_opt = None, Some(TestConstants.initiatorPushAmount), requireConfirmedInputs = false, aliceParams, alice2bob.ref, bobInit, channelFlags, channelConfig, channelType, replyTo = aliceOpenReplyTo.ref.toTyped)
+        alice ! INPUT_INIT_CHANNEL_INITIATOR(ByteVector32.Zeroes, TestConstants.fundingSatoshis, dualFunded = false, TestConstants.feeratePerKw, TestConstants.feeratePerKw, fundingTxFeeBudget_opt = None, Some(TestConstants.initiatorPushAmount), requireConfirmedInputs = false, requestFunding_opt = None, aliceParams, alice2bob.ref, bobInit, channelFlags, channelConfig, channelType, replyTo = aliceOpenReplyTo.ref.toTyped)
         alice2blockchain.expectMsgType[SetChannelId]
-        bob ! INPUT_INIT_CHANNEL_NON_INITIATOR(ByteVector32.Zeroes, None, dualFunded = false, None, bobParams, bob2alice.ref, aliceInit, channelConfig, channelType)
+        bob ! INPUT_INIT_CHANNEL_NON_INITIATOR(ByteVector32.Zeroes, None, dualFunded = false, None, requireConfirmedInputs = false, bobParams, bob2alice.ref, aliceInit, channelConfig, channelType)
         bob2blockchain.expectMsgType[SetChannelId]
         alice2bob.expectMsgType[OpenChannel]
         alice2bob.forward(bob)
@@ -267,7 +267,7 @@ class ClosingStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with
 
     // actual test starts here
     val sender = TestProbe()
-    val add = CMD_ADD_HTLC(sender.ref, 500000000 msat, ByteVector32(ByteVector.fill(32)(1)), cltvExpiry = CltvExpiry(300000), onion = TestConstants.emptyOnionPacket, None, 1.0, localOrigin(sender.ref))
+    val add = CMD_ADD_HTLC(sender.ref, 500000000 msat, ByteVector32(ByteVector.fill(32)(1)), cltvExpiry = CltvExpiry(300000), onion = TestConstants.emptyOnionPacket, None, 1.0, None, localOrigin(sender.ref))
     alice ! add
     val error = ChannelUnavailable(channelId(alice))
     sender.expectMsg(RES_ADD_FAILED(add, error, None))
@@ -291,7 +291,7 @@ class ClosingStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with
     import f._
     val sender = TestProbe()
     assert(alice.stateData.asInstanceOf[DATA_NORMAL].commitments.params.channelFeatures == channelFeatures)
-    bob.underlyingActor.nodeParams.setFeerates(FeeratesPerKw.single(FeeratePerKw(2500 sat)).copy(minimum = FeeratePerKw(250 sat), slow = FeeratePerKw(250 sat)))
+    bob.underlyingActor.nodeParams.setBitcoinCoreFeerates(FeeratesPerKw.single(FeeratePerKw(2500 sat)).copy(minimum = FeeratePerKw(250 sat), slow = FeeratePerKw(250 sat)))
     // alice initiates a closing with a low fee
     alice ! CMD_CLOSE(sender.ref, None, Some(ClosingFeerates(FeeratePerKw(500 sat), FeeratePerKw(250 sat), FeeratePerKw(1000 sat))))
     alice2bob.expectMsgType[Shutdown]
@@ -651,7 +651,7 @@ class ClosingStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with
     // simulate a node restart after a feerate increase
     val beforeRestart = alice.stateData.asInstanceOf[DATA_CLOSING]
     alice.setState(WAIT_FOR_INIT_INTERNAL, Nothing)
-    alice.underlyingActor.nodeParams.setFeerates(FeeratesPerKw.single(FeeratePerKw(15_000 sat)))
+    alice.underlyingActor.nodeParams.setBitcoinCoreFeerates(FeeratesPerKw.single(FeeratePerKw(15_000 sat)))
     alice ! INPUT_RESTORED(beforeRestart)
     alice2blockchain.expectMsgType[SetChannelId]
     awaitCond(alice.stateName == CLOSING)
@@ -739,7 +739,7 @@ class ClosingStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike with
 
     // We simulate a node restart after a feerate increase.
     val beforeRestart = alice.stateData.asInstanceOf[DATA_CLOSING]
-    alice.underlyingActor.nodeParams.setFeerates(FeeratesPerKw.single(FeeratePerKw(15_000 sat)))
+    alice.underlyingActor.nodeParams.setBitcoinCoreFeerates(FeeratesPerKw.single(FeeratePerKw(15_000 sat)))
     alice.setState(WAIT_FOR_INIT_INTERNAL, Nothing)
     alice ! INPUT_RESTORED(beforeRestart)
     alice2blockchain.expectMsgType[SetChannelId]

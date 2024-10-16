@@ -30,7 +30,7 @@ import fr.acinq.eclair.channel.fsm.Channel
 import fr.acinq.eclair.io.Peer.{OpenChannelResponse, SpawnChannelNonInitiator}
 import fr.acinq.eclair.io.PendingChannelsRateLimiter.AddOrRejectChannel
 import fr.acinq.eclair.wire.protocol
-import fr.acinq.eclair.wire.protocol.{Error, NodeAddress}
+import fr.acinq.eclair.wire.protocol.{Error, LiquidityAds, NodeAddress}
 import fr.acinq.eclair.{AcceptOpenChannel, CltvExpiryDelta, Features, InitFeature, InterceptOpenChannelPlugin, InterceptOpenChannelReceived, InterceptOpenChannelResponse, Logs, MilliSatoshi, NodeParams, RejectOpenChannel, ToMilliSatoshiConversion}
 import scodec.bits.ByteVector
 
@@ -63,6 +63,8 @@ object OpenChannelInterceptor {
   private sealed trait CheckRateLimitsCommands extends Command
   private case class PendingChannelsRateLimiterResponse(response: PendingChannelsRateLimiter.Response) extends CheckRateLimitsCommands
 
+  private case class WrappedPeerChannels(channels: Seq[Peer.ChannelInfo]) extends Command
+
   private sealed trait QueryPluginCommands extends Command
   private case class PluginOpenChannelResponse(pluginResponse: InterceptOpenChannelResponse) extends QueryPluginCommands
   private case object PluginTimeout extends QueryPluginCommands
@@ -82,7 +84,7 @@ object OpenChannelInterceptor {
       }
     }
 
-  def makeChannelParams(nodeParams: NodeParams, initFeatures: Features[InitFeature], upfrontShutdownScript_opt: Option[ByteVector], walletStaticPaymentBasepoint_opt: Option[PublicKey], isChannelOpener: Boolean, dualFunded: Boolean, fundingAmount: Satoshi, unlimitedMaxHtlcValueInFlight: Boolean): LocalParams = {
+  def makeChannelParams(nodeParams: NodeParams, initFeatures: Features[InitFeature], upfrontShutdownScript_opt: Option[ByteVector], walletStaticPaymentBasepoint_opt: Option[PublicKey], isChannelOpener: Boolean, paysCommitTxFees: Boolean, dualFunded: Boolean, fundingAmount: Satoshi, unlimitedMaxHtlcValueInFlight: Boolean): LocalParams = {
     val maxHtlcValueInFlightMsat = if (unlimitedMaxHtlcValueInFlight) {
       // We don't want to impose limits on the amount in flight, typically to allow fully emptying the channel.
       21e6.btc.toMilliSatoshi
@@ -102,7 +104,7 @@ object OpenChannelInterceptor {
       toSelfDelay = nodeParams.channelConf.toRemoteDelay, // we choose their delay
       maxAcceptedHtlcs = nodeParams.channelConf.maxAcceptedHtlcs,
       isChannelOpener = isChannelOpener,
-      paysCommitTxFees = isChannelOpener,
+      paysCommitTxFees = paysCommitTxFees,
       upfrontShutdownScript_opt = upfrontShutdownScript_opt,
       walletStaticPaymentBasepoint = walletStaticPaymentBasepoint_opt,
       initFeatures = initFeatures
@@ -140,7 +142,7 @@ private class OpenChannelInterceptor(peer: ActorRef[Any],
       val channelType = request.open.channelType_opt.getOrElse(ChannelTypes.defaultFromFeatures(request.localFeatures, request.remoteFeatures, channelFlags.announceChannel))
       val dualFunded = Features.canUseFeature(request.localFeatures, request.remoteFeatures, Features.DualFunding)
       val upfrontShutdownScript = Features.canUseFeature(request.localFeatures, request.remoteFeatures, Features.UpfrontShutdownScript)
-      val localParams = createLocalParams(nodeParams, request.localFeatures, upfrontShutdownScript, channelType, isChannelOpener = true, dualFunded = dualFunded, request.open.fundingAmount, request.open.disableMaxHtlcValueInFlight)
+      val localParams = createLocalParams(nodeParams, request.localFeatures, upfrontShutdownScript, channelType, isChannelOpener = true, paysCommitTxFees = true, dualFunded = dualFunded, request.open.fundingAmount, request.open.disableMaxHtlcValueInFlight)
       peer ! Peer.SpawnChannelInitiator(request.replyTo, request.open, ChannelConfig.standard, channelType, localParams)
       waitForRequest()
     }
@@ -159,7 +161,23 @@ private class OpenChannelInterceptor(peer: ActorRef[Any],
       case Right(channelType) =>
         val dualFunded = Features.canUseFeature(request.localFeatures, request.remoteFeatures, Features.DualFunding)
         val upfrontShutdownScript = Features.canUseFeature(request.localFeatures, request.remoteFeatures, Features.UpfrontShutdownScript)
-        val localParams = createLocalParams(nodeParams, request.localFeatures, upfrontShutdownScript, channelType, isChannelOpener = false, dualFunded = dualFunded, request.fundingAmount, disableMaxHtlcValueInFlight = false)
+        // We only accept paying the commit fees if:
+        //  - our peer supports on-the-fly funding, indicating that they're a mobile wallet
+        //  - they are purchasing liquidity for this channel
+        val nonInitiatorPaysCommitTxFees = request.channelFlags.nonInitiatorPaysCommitFees &&
+          Features.canUseFeature(request.localFeatures, request.remoteFeatures, Features.OnTheFlyFunding) &&
+          request.open.fold(_ => false, _.requestFunding_opt.isDefined)
+        val localParams = createLocalParams(
+          nodeParams,
+          request.localFeatures,
+          upfrontShutdownScript,
+          channelType,
+          isChannelOpener = false,
+          paysCommitTxFees = nonInitiatorPaysCommitTxFees,
+          dualFunded = dualFunded,
+          fundingAmount = request.fundingAmount,
+          disableMaxHtlcValueInFlight = false
+        )
         checkRateLimits(request, channelType, localParams)
       case Left(ex) =>
         context.log.warn(s"ignoring remote channel open: ${ex.getMessage}")
@@ -173,17 +191,51 @@ private class OpenChannelInterceptor(peer: ActorRef[Any],
     pendingChannelsRateLimiter ! AddOrRejectChannel(adapter, request.remoteNodeId, request.temporaryChannelId)
     receiveCommandMessage[CheckRateLimitsCommands](context, "checkRateLimits") {
       case PendingChannelsRateLimiterResponse(PendingChannelsRateLimiter.AcceptOpenChannel) =>
-        nodeParams.pluginOpenChannelInterceptor match {
-          case Some(plugin) => queryPlugin(plugin, request, localParams, ChannelConfig.standard, channelType)
-          case None =>
-            // NB: we don't add a contribution to the funding amount.
-            peer ! SpawnChannelNonInitiator(request.open, ChannelConfig.standard, channelType, localParams, None, request.peerConnection.toClassic)
-            waitForRequest()
-        }
+        checkLiquidityAdsRequest(request, channelType, localParams)
       case PendingChannelsRateLimiterResponse(PendingChannelsRateLimiter.ChannelRateLimited) =>
         context.log.warn(s"ignoring remote channel open: rate limited")
         sendFailure("rate limit reached", request)
         waitForRequest()
+    }
+  }
+
+  /**
+   * If an external plugin was configured, we forward the channel request for further analysis. Otherwise, we accept
+   * the channel and honor the optional liquidity request only for on-the-fly funding where we enforce a single channel.
+   */
+  private def checkLiquidityAdsRequest(request: OpenChannelNonInitiator, channelType: SupportedChannelType, localParams: LocalParams): Behavior[Command] = {
+    nodeParams.pluginOpenChannelInterceptor match {
+      case Some(plugin) => queryPlugin(plugin, request, localParams, ChannelConfig.standard, channelType)
+      case None =>
+        request.open.fold(_ => None, _.requestFunding_opt) match {
+          case Some(requestFunding) if Features.canUseFeature(request.localFeatures, request.remoteFeatures, Features.OnTheFlyFunding) && localParams.paysCommitTxFees =>
+            val addFunding = LiquidityAds.AddFunding(requestFunding.requestedAmount, nodeParams.willFundRates_opt)
+            val accept = SpawnChannelNonInitiator(request.open, ChannelConfig.standard, channelType, Some(addFunding), localParams, request.peerConnection.toClassic)
+            checkNoExistingChannel(request, accept)
+          case _ =>
+            // We don't honor liquidity ads for new channels: node operators should use plugin for that.
+            peer ! SpawnChannelNonInitiator(request.open, ChannelConfig.standard, channelType, addFunding_opt = None, localParams, request.peerConnection.toClassic)
+            waitForRequest()
+        }
+    }
+  }
+
+  /**
+   * In some cases we want to reject additional channels when we already have one: it is usually better to splice the
+   * existing channel instead of opening another one.
+   */
+  private def checkNoExistingChannel(request: OpenChannelNonInitiator, accept: SpawnChannelNonInitiator): Behavior[Command] = {
+    peer ! Peer.GetPeerChannels(context.messageAdapter[Peer.PeerChannels](r => WrappedPeerChannels(r.channels)))
+    receiveCommandMessage[WrappedPeerChannels](context, "checkNoExistingChannel") {
+      case WrappedPeerChannels(channels) =>
+        if (channels.forall(isClosing)) {
+          peer ! accept
+          waitForRequest()
+        } else {
+          context.log.warn("we already have an active channel, so we won't accept another one: our peer should request a splice instead")
+          sendFailure("we already have an active channel: you should splice instead of requesting another channel", request)
+          waitForRequest()
+        }
     }
   }
 
@@ -196,7 +248,7 @@ private class OpenChannelInterceptor(peer: ActorRef[Any],
       receiveCommandMessage[QueryPluginCommands](context, "queryPlugin") {
         case PluginOpenChannelResponse(pluginResponse: AcceptOpenChannel) =>
           val localParams1 = updateLocalParams(localParams, pluginResponse.defaultParams)
-          peer ! SpawnChannelNonInitiator(request.open, channelConfig, channelType, localParams1, pluginResponse.localFundingAmount_opt, request.peerConnection.toClassic)
+          peer ! SpawnChannelNonInitiator(request.open, channelConfig, channelType, pluginResponse.addFunding_opt, localParams1, request.peerConnection.toClassic)
           timers.cancel(PluginTimeout)
           waitForRequest()
         case PluginOpenChannelResponse(pluginResponse: RejectOpenChannel) =>
@@ -209,6 +261,23 @@ private class OpenChannelInterceptor(peer: ActorRef[Any],
           waitForRequest()
       }
     }
+
+  private def isClosing(channel: Peer.ChannelInfo): Boolean = channel.state match {
+    case CLOSED => true
+    case _ => channel.data match {
+      case _: TransientChannelData => false
+      case _: ChannelDataWithoutCommitments => false
+      case _: DATA_WAIT_FOR_FUNDING_CONFIRMED => false
+      case _: DATA_WAIT_FOR_CHANNEL_READY => false
+      case _: DATA_WAIT_FOR_DUAL_FUNDING_CONFIRMED => false
+      case _: DATA_WAIT_FOR_DUAL_FUNDING_READY => false
+      case _: DATA_NORMAL => false
+      case _: DATA_SHUTDOWN => true
+      case _: DATA_NEGOTIATING => true
+      case _: DATA_CLOSING => true
+      case _: DATA_WAIT_FOR_REMOTE_PUBLISH_FUTURE_COMMITMENT => true
+    }
+  }
 
   private def sendFailure(error: String, request: OpenChannelNonInitiator): Unit = {
     peer ! Peer.OutgoingMessage(Error(request.temporaryChannelId, error), request.peerConnection.toClassic)
@@ -245,13 +314,14 @@ private class OpenChannelInterceptor(peer: ActorRef[Any],
     }
   }
 
-  private def createLocalParams(nodeParams: NodeParams, initFeatures: Features[InitFeature], upfrontShutdownScript: Boolean, channelType: SupportedChannelType, isChannelOpener: Boolean, dualFunded: Boolean, fundingAmount: Satoshi, disableMaxHtlcValueInFlight: Boolean): LocalParams = {
+  private def createLocalParams(nodeParams: NodeParams, initFeatures: Features[InitFeature], upfrontShutdownScript: Boolean, channelType: SupportedChannelType, isChannelOpener: Boolean, paysCommitTxFees: Boolean, dualFunded: Boolean, fundingAmount: Satoshi, disableMaxHtlcValueInFlight: Boolean): LocalParams = {
     val pubkey_opt = if (upfrontShutdownScript || channelType.paysDirectlyToWallet) Some(wallet.getP2wpkhPubkey()) else None
     makeChannelParams(
       nodeParams, initFeatures,
       if (upfrontShutdownScript) Some(Script.write(Script.pay2wpkh(pubkey_opt.get))) else None,
       if (channelType.paysDirectlyToWallet) Some(pubkey_opt.get) else None,
       isChannelOpener = isChannelOpener,
+      paysCommitTxFees = paysCommitTxFees,
       dualFunded = dualFunded,
       fundingAmount,
       disableMaxHtlcValueInFlight

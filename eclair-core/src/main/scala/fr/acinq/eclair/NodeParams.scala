@@ -18,24 +18,26 @@ package fr.acinq.eclair
 
 import com.typesafe.config.{Config, ConfigFactory, ConfigValueType}
 import fr.acinq.bitcoin.scalacompat.Crypto.PublicKey
-import fr.acinq.bitcoin.scalacompat.{Block, BlockHash, Crypto, Satoshi}
+import fr.acinq.bitcoin.scalacompat.{Block, BlockHash, Crypto, Satoshi, SatoshiLong}
 import fr.acinq.eclair.Setup.Seeds
 import fr.acinq.eclair.blockchain.fee._
-import fr.acinq.eclair.channel.ChannelFlags
 import fr.acinq.eclair.channel.fsm.Channel
 import fr.acinq.eclair.channel.fsm.Channel.{BalanceThreshold, ChannelConf, UnhandledExceptionStrategy}
+import fr.acinq.eclair.channel.{ChannelFlags, ChannelTypes}
 import fr.acinq.eclair.crypto.Noise.KeyPair
 import fr.acinq.eclair.crypto.keymanager.{ChannelKeyManager, NodeKeyManager, OnChainKeyManager}
 import fr.acinq.eclair.db._
 import fr.acinq.eclair.io.MessageRelay.{RelayAll, RelayChannelsOnly, RelayPolicy}
 import fr.acinq.eclair.io.{PeerConnection, PeerReadyNotifier}
 import fr.acinq.eclair.message.OnionMessages.OnionMessageConfig
+import fr.acinq.eclair.payment.relay.OnTheFlyFunding
 import fr.acinq.eclair.payment.relay.Relayer.{AsyncPaymentsParams, RelayFees, RelayParams}
 import fr.acinq.eclair.router.Announcements.AddressException
 import fr.acinq.eclair.router.Graph.{HeuristicsConstants, WeightRatios}
 import fr.acinq.eclair.router.Router._
 import fr.acinq.eclair.router.{Graph, PathFindingExperimentConf}
 import fr.acinq.eclair.tor.Socks5ProxyParams
+import fr.acinq.eclair.transactions.Transactions
 import fr.acinq.eclair.wire.protocol._
 import grizzled.slf4j.Logging
 import scodec.bits.ByteVector
@@ -57,7 +59,7 @@ case class NodeParams(nodeKeyManager: NodeKeyManager,
                       onChainKeyManager_opt: Option[OnChainKeyManager],
                       instanceId: UUID, // a unique instance ID regenerated after each restart
                       private val blockHeight: AtomicLong,
-                      private val feerates: AtomicReference[FeeratesPerKw],
+                      private val bitcoinCoreFeerates: AtomicReference[FeeratesPerKw],
                       alias: String,
                       color: Color,
                       publicAddresses: List[NodeAddress],
@@ -88,7 +90,9 @@ case class NodeParams(nodeKeyManager: NodeKeyManager,
                       onionMessageConfig: OnionMessageConfig,
                       purgeInvoicesInterval: Option[FiniteDuration],
                       revokedHtlcInfoCleanerConfig: RevokedHtlcInfoCleaner.Config,
-                      peerWakeUpConfig: PeerReadyNotifier.WakeUpConfig) {
+                      willFundRates_opt: Option[LiquidityAds.WillFundRates],
+                      peerWakeUpConfig: PeerReadyNotifier.WakeUpConfig,
+                      onTheFlyFundingConfig: OnTheFlyFunding.Config) {
   val privateKey: Crypto.PrivateKey = nodeKeyManager.nodeKey.privateKey
 
   val nodeId: PublicKey = nodeKeyManager.nodeId
@@ -101,13 +105,36 @@ case class NodeParams(nodeKeyManager: NodeKeyManager,
 
   def currentBlockHeight: BlockHeight = BlockHeight(blockHeight.get)
 
-  def currentFeerates: FeeratesPerKw = feerates.get()
+  def currentBitcoinCoreFeerates: FeeratesPerKw = bitcoinCoreFeerates.get()
 
   /** Only to be used in tests. */
-  def setFeerates(value: FeeratesPerKw): Unit = feerates.set(value)
+  def setBitcoinCoreFeerates(value: FeeratesPerKw): Unit = bitcoinCoreFeerates.set(value)
 
   /** Returns the features that should be used in our init message with the given peer. */
   def initFeaturesFor(nodeId: PublicKey): Features[InitFeature] = overrideInitFeatures.getOrElse(nodeId, features).initFeatures()
+
+  /** Returns the feerates we'd like our peer to use when funding channels. */
+  def recommendedFeerates(remoteNodeId: PublicKey, localFeatures: Features[InitFeature], remoteFeatures: Features[InitFeature]): RecommendedFeerates = {
+    // Independently of target and tolerance ratios, our transactions must be publishable in our local mempool
+    val minimumFeerate = currentBitcoinCoreFeerates.minimum
+    val feerateTolerance = onChainFeeConf.feerateToleranceFor(remoteNodeId)
+    val fundingFeerate = onChainFeeConf.getFundingFeerate(currentBitcoinCoreFeerates)
+    val fundingRange = RecommendedFeeratesTlv.FundingFeerateRange(
+      min = (fundingFeerate * feerateTolerance.ratioLow).max(minimumFeerate),
+      max = (fundingFeerate * feerateTolerance.ratioHigh).max(minimumFeerate),
+    )
+    // We use the most likely commitment format, even though there is no guarantee that this is the one that will be used.
+    val commitmentFormat = ChannelTypes.defaultFromFeatures(localFeatures, remoteFeatures, announceChannel = false).commitmentFormat
+    val commitmentFeerate = onChainFeeConf.getCommitmentFeerate(currentBitcoinCoreFeerates, remoteNodeId, commitmentFormat, channelConf.minFundingPrivateSatoshis)
+    val commitmentRange = RecommendedFeeratesTlv.CommitmentFeerateRange(
+      min = (commitmentFeerate * feerateTolerance.ratioLow).max(minimumFeerate),
+      max = (commitmentFormat match {
+        case Transactions.DefaultCommitmentFormat => commitmentFeerate * feerateTolerance.ratioHigh
+        case _: Transactions.AnchorOutputsCommitmentFormat => (commitmentFeerate * feerateTolerance.ratioHigh).max(feerateTolerance.anchorOutputMaxCommitFeerate)
+      }).max(minimumFeerate),
+    )
+    RecommendedFeerates(chainHash, fundingFeerate, commitmentFeerate, TlvStream(fundingRange, commitmentRange))
+  }
 }
 
 case class PaymentFinalExpiryConf(min: CltvExpiryDelta, max: CltvExpiryDelta) {
@@ -218,7 +245,7 @@ object NodeParams extends Logging {
 
   def makeNodeParams(config: Config, instanceId: UUID,
                      nodeKeyManager: NodeKeyManager, channelKeyManager: ChannelKeyManager, onChainKeyManager_opt: Option[OnChainKeyManager],
-                     torAddress_opt: Option[NodeAddress], database: Databases, blockHeight: AtomicLong, feerates: AtomicReference[FeeratesPerKw],
+                     torAddress_opt: Option[NodeAddress], database: Databases, blockHeight: AtomicLong, bitcoinCoreFeerates: AtomicReference[FeeratesPerKw],
                      pluginParams: Seq[PluginParams] = Nil): NodeParams = {
     // check configuration for keys that have been renamed
     val deprecatedKeyPaths = Map(
@@ -480,13 +507,43 @@ object NodeParams extends Logging {
     val maxNoChannels = config.getInt("peer-connection.max-no-channels")
     require(maxNoChannels > 0, "peer-connection.max-no-channels must be > 0")
 
+    val willFundRates_opt = {
+      val supportedPaymentTypes = Map(
+        LiquidityAds.PaymentType.FromChannelBalance.rfcName -> LiquidityAds.PaymentType.FromChannelBalance,
+        LiquidityAds.PaymentType.FromChannelBalanceForFutureHtlc.rfcName -> LiquidityAds.PaymentType.FromChannelBalanceForFutureHtlc,
+        LiquidityAds.PaymentType.FromFutureHtlc.rfcName -> LiquidityAds.PaymentType.FromFutureHtlc,
+        LiquidityAds.PaymentType.FromFutureHtlcWithPreimage.rfcName -> LiquidityAds.PaymentType.FromFutureHtlcWithPreimage,
+      )
+      val paymentTypes: Set[LiquidityAds.PaymentType] = config.getStringList("liquidity-ads.payment-types").asScala.map(s => {
+        supportedPaymentTypes.get(s) match {
+          case Some(paymentType) => paymentType
+          case None => throw new IllegalArgumentException(s"unknown liquidity ads payment type: $s")
+        }
+      }).toSet
+      val fundingRates: List[LiquidityAds.FundingRate] = config.getConfigList("liquidity-ads.funding-rates").asScala.map { r =>
+        LiquidityAds.FundingRate(
+          minAmount = r.getLong("min-funding-amount-satoshis").sat,
+          maxAmount = r.getLong("max-funding-amount-satoshis").sat,
+          fundingWeight = r.getInt("funding-weight"),
+          feeBase = r.getLong("fee-base-satoshis").sat,
+          feeProportional = r.getInt("fee-basis-points"),
+          channelCreationFee = r.getLong("channel-creation-fee-satoshis").sat,
+        )
+      }.toList
+      if (fundingRates.nonEmpty && paymentTypes.nonEmpty) {
+        Some(LiquidityAds.WillFundRates(fundingRates, paymentTypes))
+      } else {
+        None
+      }
+    }
+
     NodeParams(
       nodeKeyManager = nodeKeyManager,
       channelKeyManager = channelKeyManager,
       onChainKeyManager_opt = onChainKeyManager_opt,
       instanceId = instanceId,
       blockHeight = blockHeight,
-      feerates = feerates,
+      bitcoinCoreFeerates = bitcoinCoreFeerates,
       alias = nodeAlias,
       color = Color(color(0), color(1), color(2)),
       publicAddresses = addresses,
@@ -616,9 +673,13 @@ object NodeParams extends Logging {
         batchSize = config.getInt("db.revoked-htlc-info-cleaner.batch-size"),
         interval = FiniteDuration(config.getDuration("db.revoked-htlc-info-cleaner.interval").getSeconds, TimeUnit.SECONDS)
       ),
+      willFundRates_opt = willFundRates_opt,
       peerWakeUpConfig = PeerReadyNotifier.WakeUpConfig(
         enabled = config.getBoolean("peer-wake-up.enabled"),
-        timeout = FiniteDuration(config.getDuration("peer-wake-up.timeout").getSeconds, TimeUnit.SECONDS)
+        timeout = FiniteDuration(config.getDuration("peer-wake-up.timeout").getSeconds, TimeUnit.SECONDS),
+      ),
+      onTheFlyFundingConfig = OnTheFlyFunding.Config(
+        proposalTimeout = FiniteDuration(config.getDuration("on-the-fly-funding.proposal-timeout").getSeconds, TimeUnit.SECONDS),
       ),
     )
   }

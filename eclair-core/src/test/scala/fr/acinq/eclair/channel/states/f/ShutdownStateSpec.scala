@@ -141,7 +141,7 @@ class ShutdownStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike wit
   test("recv CMD_ADD_HTLC") { f =>
     import f._
     val sender = TestProbe()
-    val add = CMD_ADD_HTLC(sender.ref, 500000000 msat, r1, cltvExpiry = CltvExpiry(300000), TestConstants.emptyOnionPacket, None, 1.0, localOrigin(sender.ref))
+    val add = CMD_ADD_HTLC(sender.ref, 500000000 msat, r1, cltvExpiry = CltvExpiry(300000), TestConstants.emptyOnionPacket, None, 1.0, None, localOrigin(sender.ref))
     alice ! add
     val error = ChannelUnavailable(channelId(alice))
     sender.expectMsg(RES_ADD_FAILED(add, error, None))
@@ -662,17 +662,17 @@ class ShutdownStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike wit
   test("recv CurrentFeerate (when funder, triggers an UpdateFee)") { f =>
     import f._
     val initialState = alice.stateData.asInstanceOf[DATA_SHUTDOWN]
-    val event = CurrentFeerates(FeeratesPerKw(minimum = FeeratePerKw(250 sat), fastest = FeeratePerKw(10_000 sat), fast = FeeratePerKw(5_000 sat), medium = FeeratePerKw(1000 sat), slow = FeeratePerKw(500 sat)))
+    val event = CurrentFeerates.BitcoinCore(FeeratesPerKw(minimum = FeeratePerKw(250 sat), fastest = FeeratePerKw(10_000 sat), fast = FeeratePerKw(5_000 sat), medium = FeeratePerKw(1000 sat), slow = FeeratePerKw(500 sat)))
     alice.setFeerates(event.feeratesPerKw)
     alice ! event
-    alice2bob.expectMsg(UpdateFee(initialState.commitments.channelId, alice.underlyingActor.nodeParams.onChainFeeConf.getCommitmentFeerate(alice.underlyingActor.nodeParams.currentFeerates, alice.underlyingActor.remoteNodeId, initialState.commitments.params.commitmentFormat, initialState.commitments.latest.capacity)))
+    alice2bob.expectMsg(UpdateFee(initialState.commitments.channelId, alice.underlyingActor.nodeParams.onChainFeeConf.getCommitmentFeerate(alice.underlyingActor.nodeParams.currentBitcoinCoreFeerates, alice.underlyingActor.remoteNodeId, initialState.commitments.params.commitmentFormat, initialState.commitments.latest.capacity)))
   }
 
   test("recv CurrentFeerate (when funder, triggers an UpdateFee, anchor outputs)", Tag(ChannelStateTestsTags.AnchorOutputsZeroFeeHtlcTxs)) { f =>
     import f._
     val initialState = alice.stateData.asInstanceOf[DATA_SHUTDOWN]
     assert(initialState.commitments.latest.localCommit.spec.commitTxFeerate == TestConstants.anchorOutputsFeeratePerKw)
-    val event = CurrentFeerates(FeeratesPerKw.single(TestConstants.anchorOutputsFeeratePerKw / 2).copy(minimum = FeeratePerKw(250 sat)))
+    val event = CurrentFeerates.BitcoinCore(FeeratesPerKw.single(TestConstants.anchorOutputsFeeratePerKw / 2).copy(minimum = FeeratePerKw(250 sat)))
     alice.setFeerates(event.feeratesPerKw)
     alice ! event
     alice2bob.expectMsg(UpdateFee(initialState.commitments.channelId, TestConstants.anchorOutputsFeeratePerKw / 2))
@@ -680,7 +680,7 @@ class ShutdownStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike wit
 
   test("recv CurrentFeerate (when funder, doesn't trigger an UpdateFee)") { f =>
     import f._
-    val event = CurrentFeerates(FeeratesPerKw.single(FeeratePerKw(10010 sat)))
+    val event = CurrentFeerates.BitcoinCore(FeeratesPerKw.single(FeeratePerKw(10010 sat)))
     alice.setFeerates(event.feeratesPerKw)
     alice ! event
     alice2bob.expectNoMessage(500 millis)
@@ -690,7 +690,7 @@ class ShutdownStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike wit
     import f._
     val initialState = alice.stateData.asInstanceOf[DATA_SHUTDOWN]
     assert(initialState.commitments.latest.localCommit.spec.commitTxFeerate == TestConstants.anchorOutputsFeeratePerKw)
-    val event = CurrentFeerates(FeeratesPerKw.single(TestConstants.anchorOutputsFeeratePerKw * 2).copy(minimum = FeeratePerKw(250 sat)))
+    val event = CurrentFeerates.BitcoinCore(FeeratesPerKw.single(TestConstants.anchorOutputsFeeratePerKw * 2).copy(minimum = FeeratePerKw(250 sat)))
     alice.setFeerates(event.feeratesPerKw)
     alice ! event
     alice2bob.expectNoMessage(500 millis)
@@ -698,7 +698,7 @@ class ShutdownStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike wit
 
   test("recv CurrentFeerate (when fundee, commit-fee/network-fee are close)") { f =>
     import f._
-    val event = CurrentFeerates(FeeratesPerKw.single(FeeratePerKw(11000 sat)))
+    val event = CurrentFeerates.BitcoinCore(FeeratesPerKw.single(FeeratePerKw(11000 sat)))
     bob.setFeerates(event.feeratesPerKw)
     bob ! event
     bob2alice.expectNoMessage(500 millis)
@@ -706,7 +706,7 @@ class ShutdownStateSpec extends TestKitBaseClass with FixtureAnyFunSuiteLike wit
 
   test("recv CurrentFeerate (when fundee, commit-fee/network-fee are very different)") { f =>
     import f._
-    val event = CurrentFeerates(FeeratesPerKw.single(FeeratePerKw(25000 sat)))
+    val event = CurrentFeerates.BitcoinCore(FeeratesPerKw.single(FeeratePerKw(25000 sat)))
     bob.setFeerates(event.feeratesPerKw)
     bob ! event
     bob2alice.expectMsgType[Error]
