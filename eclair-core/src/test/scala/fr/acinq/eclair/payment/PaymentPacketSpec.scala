@@ -779,15 +779,15 @@ object PaymentPacketSpec {
 
   val expiry_de = finalExpiry
   val amount_de = finalAmount
-  val fee_d = nodeFee(channelUpdate_de.relayFees, amount_de, None)
+  val fee_d = nodeFee(channelUpdate_de.relayFees, amount_de)
 
   val expiry_cd = expiry_de + channelUpdate_de.cltvExpiryDelta
   val amount_cd = amount_de + fee_d
-  val fee_c = nodeFee(channelUpdate_cd.relayFees, amount_cd, None)
+  val fee_c = nodeFee(channelUpdate_cd.relayFees, amount_cd)
 
   val expiry_bc = expiry_cd + channelUpdate_cd.cltvExpiryDelta
   val amount_bc = amount_cd + fee_c
-  val fee_b = nodeFee(channelUpdate_bc.relayFees, amount_bc, None)
+  val fee_b = nodeFee(channelUpdate_bc.relayFees, amount_bc)
 
   val expiry_ab = expiry_bc + channelUpdate_bc.cltvExpiryDelta
   val amount_ab = amount_bc + fee_b

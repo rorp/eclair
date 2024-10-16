@@ -29,6 +29,7 @@ import fr.acinq.eclair.router.Graph.GraphStructure.{DirectedGraph, GraphEdge}
 import fr.acinq.eclair.router.Graph.{InfiniteLoop, MessagePath, NegativeProbability, RichWeight}
 import fr.acinq.eclair.router.Monitoring.{Metrics, Tags}
 import fr.acinq.eclair.router.Router._
+import fr.acinq.eclair.wire.protocol.ChannelUpdateTlv.Blip18InboundFee
 import kamon.tag.TagSet
 
 import scala.annotation.tailrec
@@ -306,8 +307,36 @@ object RouteCalculation {
                 routeParams: RouteParams,
                 currentBlockHeight: BlockHeight): Try[Seq[Route]] = Try {
     findRouteInternal(g, localNodeId, targetNodeId, amount, maxFee, numRoutes, extraEdges, ignoredEdges, ignoredVertices, routeParams, currentBlockHeight) match {
-      case Right(routes) => routes.map(route => Route(amount, route.path.map(graphEdgeToHop), None))
+      case Right(routes) => routes.map { route =>
+        if (routeParams.blip18InboundFees)
+          routeWithInboundFees(amount, route.path.map(graphEdgeToHop), g)
+        else
+          Route(amount, route.path.map(graphEdgeToHop), None)
+      }
       case Left(ex) => return Failure(ex)
+    }
+  }
+
+  private def routeWithInboundFees(amount: MilliSatoshi, routeHops: Seq[ChannelHop], g: DirectedGraph): Route = {
+    if (routeHops.tail.isEmpty) {
+      Route(amount, routeHops, None)
+    } else {
+      val hops = routeHops.reverse
+      val updatedHops = routeHops.head :: hops.zip(hops.tail).foldLeft(List.empty[ChannelHop]) { (hops, x) =>
+        val (curr, prev) = x
+        val maybeEdge = g.getBackEdge(ChannelDesc(prev.shortChannelId, prev.nodeId, prev.nextNodeId))
+        val hop = curr.copy(params = curr.params match {
+          case hopParams: HopRelayParams.FromAnnouncement =>
+            maybeEdge match {
+              case Some(backEdge) => hopParams.copy(updatedInboundFees_opt = backEdge.params.inboundFees_opt)
+              case _ => hopParams
+            }
+          case hopParams => hopParams
+        })
+
+        hop :: hops
+      }
+      Route(amount, updatedHops, None)
     }
   }
 
@@ -335,7 +364,7 @@ object RouteCalculation {
 
     val boundaries: RichWeight => Boolean = { weight => feeOk(weight.amount - amount) && lengthOk(weight.length) && cltvOk(weight.cltv) }
 
-    val foundRoutes: Seq[Graph.WeightedPath] = Graph.yenKshortestPaths(g, localNodeId, targetNodeId, amount, ignoredEdges, ignoredVertices, extraEdges, numRoutes, routeParams.heuristics, currentBlockHeight, boundaries, routeParams.includeLocalChannelCost)
+    val foundRoutes: Seq[Graph.WeightedPath] = Graph.yenKshortestPaths(g, localNodeId, targetNodeId, amount, ignoredEdges, ignoredVertices, extraEdges, numRoutes, routeParams.heuristics, currentBlockHeight, boundaries, routeParams.includeLocalChannelCost, routeParams.excludePositiveInboundFees)
     if (foundRoutes.nonEmpty) {
       val (directRoutes, indirectRoutes) = foundRoutes.partition(_.path.length == 1)
       val routes = if (routeParams.randomize) {

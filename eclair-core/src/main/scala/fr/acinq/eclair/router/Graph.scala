@@ -120,10 +120,11 @@ object Graph {
                         wr: Either[WeightRatios, HeuristicsConstants],
                         currentBlockHeight: BlockHeight,
                         boundaries: RichWeight => Boolean,
-                        includeLocalChannelCost: Boolean): Seq[WeightedPath] = {
+                        includeLocalChannelCost: Boolean,
+                        excludePositiveInboundFees: Boolean = false): Seq[WeightedPath] = {
     // find the shortest path (k = 0)
     val targetWeight = RichWeight(amount, 0, CltvExpiryDelta(0), 1.0, 0 msat, 0 msat, 0.0)
-    val shortestPath = dijkstraShortestPath(graph, sourceNode, targetNode, ignoredEdges, ignoredVertices, extraEdges, targetWeight, boundaries, currentBlockHeight, wr, includeLocalChannelCost)
+    val shortestPath = dijkstraShortestPath(graph, sourceNode, targetNode, ignoredEdges, ignoredVertices, extraEdges, targetWeight, boundaries, currentBlockHeight, wr, includeLocalChannelCost, excludePositiveInboundFees)
     if (shortestPath.isEmpty) {
       return Seq.empty // if we can't even find a single path, avoid returning a Seq(Seq.empty)
     }
@@ -162,7 +163,7 @@ object Graph {
           val alreadyExploredVertices = rootPathEdges.map(_.desc.b).toSet
           val rootPathWeight = pathWeight(sourceNode, rootPathEdges, amount, currentBlockHeight, wr, includeLocalChannelCost)
           // find the "spur" path, a sub-path going from the spur node to the target avoiding previously found sub-paths
-          val spurPath = dijkstraShortestPath(graph, sourceNode, spurNode, ignoredEdges ++ alreadyExploredEdges, ignoredVertices ++ alreadyExploredVertices, extraEdges, rootPathWeight, boundaries, currentBlockHeight, wr, includeLocalChannelCost)
+          val spurPath = dijkstraShortestPath(graph, sourceNode, spurNode, ignoredEdges ++ alreadyExploredEdges, ignoredVertices ++ alreadyExploredVertices, extraEdges, rootPathWeight, boundaries, currentBlockHeight, wr, includeLocalChannelCost, excludePositiveInboundFees)
           if (spurPath.nonEmpty) {
             val completePath = spurPath ++ rootPathEdges
             val candidatePath = WeightedPath(completePath, pathWeight(sourceNode, completePath, amount, currentBlockHeight, wr, includeLocalChannelCost))
@@ -210,7 +211,8 @@ object Graph {
                                    boundaries: RichWeight => Boolean,
                                    currentBlockHeight: BlockHeight,
                                    wr: Either[WeightRatios, HeuristicsConstants],
-                                   includeLocalChannelCost: Boolean): Seq[GraphEdge] = {
+                                   includeLocalChannelCost: Boolean,
+                                   excludePositiveInboundFees: Boolean): Seq[GraphEdge] = {
     // the graph does not contain source/destination nodes
     val sourceNotInGraph = !g.containsVertex(sourceNode) && !extraEdges.exists(_.desc.a == sourceNode)
     val targetNotInGraph = !g.containsVertex(targetNode) && !extraEdges.exists(_.desc.b == targetNode)
@@ -250,9 +252,9 @@ object Graph {
             edge.balance_opt.forall(current.weight.amount <= _) &&
             edge.params.htlcMaximum_opt.forall(current.weight.amount <= _) &&
             current.weight.amount >= edge.params.htlcMinimum &&
-            edge.params.inboundFees_opt.forall(i => i.feeBase.toLong <= 0 && i.feeProportionalMillionths <= 0) &&
             !ignoredEdges.contains(edge.desc) &&
-            !ignoredVertices.contains(neighbor)) {
+            !ignoredVertices.contains(neighbor) &&
+            (!excludePositiveInboundFees || g.getBackEdge(edge).forall(e => e.params.inboundFees_opt.forall(i => i.feeBase.toLong <= 0 && i.feeProportionalMillionths <= 0)))) {
             // NB: this contains the amount (including fees) that will need to be sent to `neighbor`, but the amount that
             // will be relayed through that edge is the one in `currentWeight`.
             val neighborWeight = addEdgeWeight(sourceNode, edge, current.weight, currentBlockHeight, wr, includeLocalChannelCost)
@@ -307,7 +309,7 @@ object Graph {
     val totalCltv = prev.cltv + cltv
     val richWeight = weightRatios match {
       case Left(weightRatios) =>
-        val hopCost = if (edge.desc.a == sender) 0 msat else nodeFee(weightRatios.hopCost, prev.amount, None)
+        val hopCost = if (edge.desc.a == sender) 0 msat else nodeFee(weightRatios.hopCost, prev.amount)
         import RoutingHeuristics._
 
         // Every edge is weighted by funding block height where older blocks add less weight. The window considered is 1 year.
@@ -333,7 +335,7 @@ object Graph {
         val totalWeight = prev.weight + (fee + hopCost).toLong * factor
         RichWeight(totalAmount, prev.length + 1, totalCltv, 1.0, totalFees, 0 msat, totalWeight)
       case Right(heuristicsConstants) =>
-        val hopCost = nodeFee(heuristicsConstants.hopCost, prev.amount, None)
+        val hopCost = nodeFee(heuristicsConstants.hopCost, prev.amount)
         val totalHopsCost = prev.virtualFees + hopCost
         // If we know the balance of the channel, then we will check separately that it can relay the payment.
         val successProbability = if (edge.balance_opt.nonEmpty) 1.0 else 1.0 - prev.amount.toLong.toDouble / edge.capacity.toMilliSatoshi.toLong.toDouble
@@ -341,7 +343,7 @@ object Graph {
           throw NegativeProbability(edge, prev, heuristicsConstants)
         }
         val totalSuccessProbability = prev.successProbability * successProbability
-        val failureCost = nodeFee(heuristicsConstants.failureCost, totalAmount, None)
+        val failureCost = nodeFee(heuristicsConstants.failureCost, totalAmount)
         if (heuristicsConstants.useLogProbability) {
           val riskCost = totalAmount.toLong * cltv.toInt * heuristicsConstants.lockedFundsRisk
           val weight = prev.weight + fee.toLong + hopCost.toLong + riskCost - failureCost.toLong * math.log(successProbability)
@@ -686,6 +688,10 @@ object Graph {
 
       def getEdge(desc: ChannelDesc): Option[GraphEdge] =
         vertices.get(desc.b).flatMap(_.incomingEdges.get(desc))
+
+      def getBackEdge(desc: ChannelDesc): Option[GraphEdge] = getEdge(desc.copy(a = desc.b, b = desc.a))
+
+      def getBackEdge(edge: GraphEdge): Option[GraphEdge] = getBackEdge(edge.desc)
 
       /**
        * @param keyA the key associated with the starting vertex

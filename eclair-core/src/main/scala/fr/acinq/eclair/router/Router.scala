@@ -344,14 +344,18 @@ object Router {
                              heuristics: Either[WeightRatios, HeuristicsConstants],
                              mpp: MultiPartParams,
                              experimentName: String,
-                             experimentPercentage: Int) {
+                             experimentPercentage: Int,
+                             blip18InboundFees: Boolean = false,
+                             excludePositiveInboundFees: Boolean = false) {
     def getDefaultRouteParams: RouteParams = RouteParams(
       randomize = randomize,
       boundaries = boundaries,
       heuristics = heuristics,
       mpp = mpp,
       experimentName = experimentName,
-      includeLocalChannelCost = false
+      includeLocalChannelCost = false,
+      blip18InboundFees = blip18InboundFees,
+      excludePositiveInboundFees = excludePositiveInboundFees
     )
   }
 
@@ -474,7 +478,12 @@ object Router {
     def cltvExpiryDelta: CltvExpiryDelta
     def relayFees: Relayer.RelayFees
     def inboundFees_opt: Option[Relayer.InboundFees]
-    final def fee(amount: MilliSatoshi): MilliSatoshi = nodeFee(relayFees, amount, inboundFees_opt)
+    final def fee(amount: MilliSatoshi): MilliSatoshi = {
+      val outFee = nodeFee(relayFees, amount)
+      val inFee = inboundFees_opt.map(i => nodeFee(i.feeBase, i.feeProportionalMillionths, amount + outFee)).getOrElse(0 msat)
+      val totalFee = outFee + inFee
+      if (totalFee.toLong < 0) 0 msat else totalFee
+    }
     def htlcMinimum: MilliSatoshi
     def htlcMaximum_opt: Option[MilliSatoshi]
     // @formatter:on
@@ -482,10 +491,10 @@ object Router {
 
   object HopRelayParams {
     /** We learnt about this channel from a channel_update. */
-    case class FromAnnouncement(channelUpdate: ChannelUpdate) extends HopRelayParams {
+    case class FromAnnouncement(channelUpdate: ChannelUpdate, updatedInboundFees_opt: Option[Relayer.InboundFees] = None) extends HopRelayParams {
       override val cltvExpiryDelta = channelUpdate.cltvExpiryDelta
       override val relayFees = channelUpdate.relayFees
-      override val inboundFees_opt = channelUpdate.inboundFees_opt
+      override val inboundFees_opt = updatedInboundFees_opt orElse channelUpdate.inboundFees_opt
       override val htlcMinimum = channelUpdate.htlcMinimumMsat
       override val htlcMaximum_opt = Some(channelUpdate.htlcMaximumMsat)
 
@@ -495,7 +504,7 @@ object Router {
     case class FromHint(extraHop: Invoice.ExtraEdge) extends HopRelayParams {
       override val cltvExpiryDelta = extraHop.cltvExpiryDelta
       override val relayFees = extraHop.relayFees
-      override val inboundFees_opt = extraHop.inboundFees_opt
+      override val inboundFees_opt = None
       override val htlcMinimum = extraHop.htlcMinimum
       override val htlcMaximum_opt = extraHop.htlcMaximum_opt
     }
@@ -564,7 +573,9 @@ object Router {
                          heuristics: Either[WeightRatios, HeuristicsConstants],
                          mpp: MultiPartParams,
                          experimentName: String,
-                         includeLocalChannelCost: Boolean) {
+                         includeLocalChannelCost: Boolean,
+                         blip18InboundFees: Boolean,
+                         excludePositiveInboundFees: Boolean) {
     def getMaxFee(amount: MilliSatoshi): MilliSatoshi = {
       // The payment fee must satisfy either the flat fee or the proportional fee, not necessarily both.
       boundaries.maxFeeFlat.max(amount * boundaries.maxFeeProportional)

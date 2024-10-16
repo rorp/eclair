@@ -360,7 +360,7 @@ class ChannelRelay private(nodeParams: NodeParams,
     val prevUpdate_opt = if (allowPreviousUpdate) outgoingChannel.prevChannelUpdate else None
     val htlcMinimumOk = update.htlcMinimumMsat <= r.amountToForward || prevUpdate_opt.exists(_.htlcMinimumMsat <= r.amountToForward)
     val expiryDeltaOk = update.cltvExpiryDelta <= r.expiryDelta || prevUpdate_opt.exists(_.cltvExpiryDelta <= r.expiryDelta)
-    val feesOk = nodeFee(update.relayFees, r.amountToForward, update.inboundFees_opt) <= r.relayFeeMsat || prevUpdate_opt.exists(u => nodeFee(u.relayFees, r.amountToForward, u.inboundFees_opt) <= r.relayFeeMsat)
+    val feesOk = nodeFee(update.relayFees, r.amountToForward) <= r.relayFeeMsat || prevUpdate_opt.exists(u => nodeFee(u.relayFees, r.amountToForward) <= r.relayFeeMsat)
     if (!htlcMinimumOk) {
       Some(CMD_FAIL_HTLC(r.add.id, Right(AmountBelowMinimum(r.amountToForward, Some(update))), commit = true))
     } else if (!expiryDeltaOk) {
