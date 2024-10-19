@@ -7,7 +7,6 @@ import fr.acinq.eclair.payment.OutgoingPaymentPacket.buildOutgoingPayment
 import fr.acinq.eclair.payment.PaymentPacketSpec.{paymentHash, paymentSecret}
 import fr.acinq.eclair.payment.relay.Relayer.RelayFees
 import fr.acinq.eclair.payment.send.ClearRecipient
-import fr.acinq.eclair.router.Blip18RouteCalculationSpec.DEFAULT_MAX_FEE
 import fr.acinq.eclair.router.Graph.GraphStructure.{DirectedGraph, GraphEdge}
 import fr.acinq.eclair.router.Graph.WeightRatios
 import fr.acinq.eclair.router.RouteCalculation.findRoute
@@ -28,23 +27,25 @@ class Blip18RouteCalculationSpec extends AnyFunSuite with ParallelTestExecution 
   val (priv_a, priv_b, priv_c, priv_d, priv_e, priv_f) = (randomKey(), randomKey(), randomKey(), randomKey(), randomKey(), randomKey())
   val (a, b, c, d, e, f) = (priv_a.publicKey, priv_b.publicKey, priv_c.publicKey, priv_d.publicKey, priv_e.publicKey, priv_f.publicKey)
 
-  test("Blip18 test case") {
+  test("Blip18 test findRoute") {
     // extracted from the LND code base
     val g = DirectedGraph(Seq(
       makeEdge(10L, a, b, minHtlc = 2 msat),
-      makeEdge(10L, b, a, minHtlc = 2 msat, inboundFeeBase_opt = Some(-5000 msat), inboundFeeProportionalMillionth_opt = Some(-60000)),
+      makeEdge(10L, b, a, minHtlc = 2 msat, inboundFeeBase_opt = Some(-5000 msat), inboundFeeProportionalMillionth_opt = Some(-60_000)),
 
-      makeEdge(11L, b, c, 1000 msat, 50000, minHtlc = 2 msat),
+      makeEdge(11L, b, c, 1000 msat, 50_000, minHtlc = 2 msat),
       makeEdge(11L, c, b, minHtlc = 2 msat, inboundFeeBase_opt = Some(5000 msat), inboundFeeProportionalMillionth_opt = Some(0)),
 
-      makeEdge(12L, c, d, 0 msat, 50000, minHtlc = 2 msat),
-      makeEdge(12L, d, c, minHtlc = 2 msat, inboundFeeBase_opt = Some(-8000 msat), inboundFeeProportionalMillionth_opt = Some(-50000)),
+      makeEdge(12L, c, d, 0 msat, 50_000, minHtlc = 2 msat),
+      makeEdge(12L, d, c, minHtlc = 2 msat, inboundFeeBase_opt = Some(-8000 msat), inboundFeeProportionalMillionth_opt = Some(-50_000)),
 
-      makeEdge(13L, d, e, 9000 msat, 100000, minHtlc = 2 msat),
-      makeEdge(13L, e, d, minHtlc = 2 msat, inboundFeeBase_opt = Some(2000 msat), inboundFeeProportionalMillionth_opt = Some(80000)),
+      makeEdge(13L, d, e, 9000 msat, 100_000, minHtlc = 2 msat),
+      makeEdge(13L, e, d, minHtlc = 2 msat, inboundFeeBase_opt = Some(2000 msat), inboundFeeProportionalMillionth_opt = Some(80_000)),
     ))
 
     val Success(route :: Nil) = findRoute(g, a, e, 100_000 msat, 100_000 msat, numRoutes = 1, routeParams = DEFAULT_ROUTE_PARAMS, currentBlockHeight = BlockHeight(400000))
+
+    assert(route.channelFee(false) == 15_302.msat)
 
     val recipient = ClearRecipient(e, Features.empty, 100_000 msat, CltvExpiry(400018), paymentSecret)
     val Right(payment) = buildOutgoingPayment(TestConstants.emptyOrigin, paymentHash, route, recipient, 1.0)
@@ -54,29 +55,46 @@ class Blip18RouteCalculationSpec extends AnyFunSuite with ParallelTestExecution 
 
     val packet_b = payment.cmd.onion
 
-    val add_b = UpdateAddHtlc(randomBytes32(), 0, 100_000 msat, paymentHash, CltvExpiry(400018), packet_b, None, 1.0)
+    val add_b = UpdateAddHtlc(randomBytes32(), 0, 100_000 msat, paymentHash, CltvExpiry(400018), packet_b, None, 1.0, None)
     val Right(relay_b@ChannelRelayPacket(_, payload_b, packet_c)) = decrypt(add_b, priv_b, Features.empty)
     assert(payload_b.outgoing.contains(ShortChannelId(11L)))
     assert(relay_b.amountToForward == 115_302.msat)
-    assert(relay_b.relayFeeMsat == -15302.msat)
+    assert(relay_b.relayFeeMsat == -15_302.msat)
 
-    val add_c = UpdateAddHtlc(randomBytes32(), 1, 100_000 msat, paymentHash, CltvExpiry(400018), packet_c, None, 1.0)
+    val add_c = UpdateAddHtlc(randomBytes32(), 1, 100_000 msat, paymentHash, CltvExpiry(400018), packet_c, None, 1.0, None)
     val Right(relay_c@ChannelRelayPacket(_, payload_c, packet_d)) = decrypt(add_c, priv_c, Features.empty)
     assert(payload_c.outgoing.contains(ShortChannelId(12L)))
     assert(relay_c.amountToForward == 105_050.msat)
     assert(relay_c.relayFeeMsat == -5050.msat)
 
-    val add_d = UpdateAddHtlc(randomBytes32(), 2, 100_000 msat, paymentHash, CltvExpiry(400018), packet_d, None, 1.0)
+    val add_d = UpdateAddHtlc(randomBytes32(), 2, 100_000 msat, paymentHash, CltvExpiry(400018), packet_d, None, 1.0, None)
     val Right(relay_d@ChannelRelayPacket(_, payload_d, packet_e)) = decrypt(add_d, priv_d, Features.empty)
     assert(payload_d.outgoing.contains(ShortChannelId(13L)))
     assert(relay_d.amountToForward == 100_000.msat)
     assert(relay_d.relayFeeMsat == 0.msat)
 
-    val add_e = UpdateAddHtlc(randomBytes32(), 2, 100_000 msat, paymentHash, CltvExpiry(400018), packet_e, None, 1.0)
+    val add_e = UpdateAddHtlc(randomBytes32(), 2, 100_000 msat, paymentHash, CltvExpiry(400018), packet_e, None, 1.0, None)
     val Right(FinalPacket(_, payload_e)) = decrypt(add_e, priv_e, Features.empty)
     assert(payload_e.isInstanceOf[FinalPayload.Standard])
     assert(payload_e.amount == 100_000.msat)
     assert(payload_e.totalAmount == 100_000.msat)
+
+    {
+      val g = DirectedGraph(Seq(
+        makeEdge(10L, a, b, minHtlc = 2 msat),
+
+        makeEdge(11L, b, c, 1000 msat, 50_000, minHtlc = 2 msat),
+
+        makeEdge(12L, c, d, 0 msat, 50_000, minHtlc = 2 msat),
+
+        makeEdge(13L, d, e, 9000 msat, 100_000, minHtlc = 2 msat),
+      ))
+
+      val Success(route :: Nil) = findRoute(g, a, e, 100_000 msat, 100_000 msat, numRoutes = 1, routeParams = DEFAULT_ROUTE_PARAMS, currentBlockHeight = BlockHeight(400000))
+
+      assert(route.channelFee(false) == 32_197.msat)
+    }
+
   }
 
   test("calculate Blip18 simple route with a positive inbound fees channel") {

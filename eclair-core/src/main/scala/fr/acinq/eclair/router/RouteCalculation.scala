@@ -60,6 +60,14 @@ object RouteCalculation {
       }
     }
 
+    def validatePositiveInboundFees(route: Route, excludePositiveInboundFees: Boolean): Try[Route] = {
+      if (!excludePositiveInboundFees || route.hops.forall(hop => hop.params.inboundFees_opt.forall(i => i.feeBase <= 0.msat && i.feeProportionalMillionths <= 0))) {
+        Success(route)
+      } else {
+        Failure(new IllegalArgumentException("Route contains hops with positive inbound fees"))
+      }
+    }
+
     Logs.withMdc(log)(Logs.mdc(
       category_opt = Some(LogCategory.PAYMENT),
       parentPaymentId_opt = fr.paymentContext.map(_.parentId),
@@ -71,22 +79,31 @@ object RouteCalculation {
       val g = extraEdges.foldLeft(d.graphWithBalances.graph) { case (g: DirectedGraph, e: GraphEdge) => g.addEdge(e) }
 
       fr.route match {
-        case PredefinedNodeRoute(amount, hops, maxFee_opt) =>
+        case PredefinedNodeRoute(amount, hops, maxFee_opt, blip18InboundFees, excludePositiveInboundFees) =>
           // split into sublists [(a,b),(b,c), ...] then get the edges between each of those pairs
           hops.sliding(2).map { case List(v1, v2) => g.getEdgesBetween(v1, v2) }.toList match {
             case edges if edges.nonEmpty && edges.forall(_.nonEmpty) =>
               // select the largest edge (using balance when available, otherwise capacity).
               val selectedEdges = edges.map(es => es.maxBy(e => e.balance_opt.getOrElse(e.capacity.toMilliSatoshi)))
               val hops = selectedEdges.map(e => ChannelHop(getEdgeRelayScid(d, localNodeId, e), e.desc.a, e.desc.b, e.params))
-              validateMaxRouteFee(Route(amount, hops, None), maxFee_opt) match {
-                case Success(route) => ctx.sender() ! RouteResponse(route :: Nil)
+              val route = if (blip18InboundFees) {
+                validatePositiveInboundFees(routeWithInboundFees(amount, hops, g), excludePositiveInboundFees)
+              } else {
+                Success(Route(amount, hops, None))
+              }
+              route match {
+                case Success(r) =>
+                  validateMaxRouteFee(r, maxFee_opt) match {
+                    case Success(validatedRoute) => ctx.sender() ! RouteResponse(validatedRoute :: Nil)
+                    case Failure(f) => ctx.sender() ! Status.Failure(f)
+                  }
                 case Failure(f) => ctx.sender() ! Status.Failure(f)
               }
             case _ =>
               // some nodes in the supplied route aren't connected in our graph
               ctx.sender() ! Status.Failure(new IllegalArgumentException("Not all the nodes in the supplied route are connected with public channels"))
           }
-        case PredefinedChannelRoute(amount, targetNodeId, shortChannelIds, maxFee_opt) =>
+        case PredefinedChannelRoute(amount, targetNodeId, shortChannelIds, maxFee_opt, blip18InboundFees, excludePositiveInboundFees) =>
           val (end, hops) = shortChannelIds.foldLeft((localNodeId, Seq.empty[ChannelHop])) {
             case ((currentNode, previousHops), shortChannelId) =>
               val channelDesc_opt = d.resolve(shortChannelId) match {
@@ -110,8 +127,17 @@ object RouteCalculation {
           if (end != targetNodeId || hops.length != shortChannelIds.length) {
             ctx.sender() ! Status.Failure(new IllegalArgumentException("The sequence of channels provided cannot be used to build a route to the target node"))
           } else {
-            validateMaxRouteFee(Route(amount, hops, None), maxFee_opt) match {
-              case Success(route) => ctx.sender() ! RouteResponse(route :: Nil)
+            val route = if (blip18InboundFees) {
+              validatePositiveInboundFees(routeWithInboundFees(amount, hops, g), excludePositiveInboundFees)
+            } else {
+              Success(Route(amount, hops, None))
+            }
+            route match {
+              case Success(r) =>
+                validateMaxRouteFee(r, maxFee_opt) match {
+                  case Success(validatedRoute) => ctx.sender() ! RouteResponse(validatedRoute :: Nil)
+                  case Failure(f) => ctx.sender() ! Status.Failure(f)
+                }
               case Failure(f) => ctx.sender() ! Status.Failure(f)
             }
           }

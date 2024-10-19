@@ -684,12 +684,14 @@ object Router {
     def amount: MilliSatoshi
     def targetNodeId: PublicKey
     def maxFee_opt: Option[MilliSatoshi]
-  }
-  case class PredefinedNodeRoute(amount: MilliSatoshi, nodes: Seq[PublicKey], maxFee_opt: Option[MilliSatoshi] = None) extends PredefinedRoute {
+    def blip18InboundFees: Boolean
+    def excludePositiveInboundFees: Boolean
+    }
+  case class PredefinedNodeRoute(amount: MilliSatoshi, nodes: Seq[PublicKey], maxFee_opt: Option[MilliSatoshi] = None, blip18InboundFees: Boolean = false, excludePositiveInboundFees: Boolean = false) extends PredefinedRoute {
     override def isEmpty = nodes.isEmpty
     override def targetNodeId: PublicKey = nodes.last
   }
-  case class PredefinedChannelRoute(amount: MilliSatoshi, targetNodeId: PublicKey, channels: Seq[ShortChannelId], maxFee_opt: Option[MilliSatoshi] = None) extends PredefinedRoute {
+  case class PredefinedChannelRoute(amount: MilliSatoshi, targetNodeId: PublicKey, channels: Seq[ShortChannelId], maxFee_opt: Option[MilliSatoshi] = None, blip18InboundFees: Boolean = false, excludePositiveInboundFees: Boolean = false) extends PredefinedRoute {
     override def isEmpty = channels.isEmpty
   }
   // @formatter:on
