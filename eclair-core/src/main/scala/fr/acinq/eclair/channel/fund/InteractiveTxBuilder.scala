@@ -216,9 +216,10 @@ object InteractiveTxBuilder {
    *                             only one of them ends up confirming. We guarantee this by having the latest transaction
    *                             always double-spend all its predecessors.
    */
-  case class PreviousTxRbf(replacedCommitment: Commitment, previousLocalBalance: MilliSatoshi, previousRemoteBalance: MilliSatoshi, previousTransactions: Seq[InteractiveTxBuilder.SignedSharedTransaction], feeBudget_opt: Option[Satoshi]) extends Purpose {
-    // Note that the truncation is a no-op: the sum of balances in a channel must be a satoshi amount.
-    override val previousFundingAmount: Satoshi = (previousLocalBalance + previousRemoteBalance).truncateToSatoshi
+  case class FundingTxRbf(replacedCommitment: Commitment, previousTransactions: Seq[InteractiveTxBuilder.SignedSharedTransaction], feeBudget_opt: Option[Satoshi]) extends Purpose {
+    override val previousLocalBalance: MilliSatoshi = 0 msat
+    override val previousRemoteBalance: MilliSatoshi = 0 msat
+    override val previousFundingAmount: Satoshi = 0 sat
     override val localCommitIndex: Long = replacedCommitment.localCommit.index
     override val remoteCommitIndex: Long = replacedCommitment.remoteCommit.index
     override val localNextHtlcId: Long = 0
@@ -227,6 +228,24 @@ object InteractiveTxBuilder {
     override val commitTxFeerate: FeeratePerKw = replacedCommitment.localCommit.spec.commitTxFeerate
     override val fundingTxIndex: Long = replacedCommitment.fundingTxIndex
     override val localHtlcs: Set[DirectedHtlc] = replacedCommitment.localCommit.spec.htlcs
+  }
+
+  /**
+   * @param previousTransactions splice RBF attempts all spend the previous funding transaction, so they automatically
+   *                             double-spend each other, but we reuse previous inputs as much as possible anyway.
+   */
+  case class SpliceTxRbf(parentCommitment: Commitment, changes: CommitmentChanges, latestFundingTx: LocalFundingStatus.DualFundedUnconfirmedFundingTx, previousTransactions: Seq[InteractiveTxBuilder.SignedSharedTransaction], feeBudget_opt: Option[Satoshi]) extends Purpose {
+    override val previousLocalBalance: MilliSatoshi = parentCommitment.localCommit.spec.toLocal
+    override val previousRemoteBalance: MilliSatoshi = parentCommitment.remoteCommit.spec.toLocal
+    override val previousFundingAmount: Satoshi = parentCommitment.capacity
+    override val localCommitIndex: Long = parentCommitment.localCommit.index
+    override val remoteCommitIndex: Long = parentCommitment.remoteCommit.index
+    override val localNextHtlcId: Long = changes.localNextHtlcId
+    override val remoteNextHtlcId: Long = changes.remoteNextHtlcId
+    override val remotePerCommitmentPoint: PublicKey = parentCommitment.remoteCommit.remotePerCommitmentPoint
+    override val commitTxFeerate: FeeratePerKw = parentCommitment.localCommit.spec.commitTxFeerate
+    override val fundingTxIndex: Long = parentCommitment.fundingTxIndex + 1
+    override val localHtlcs: Set[DirectedHtlc] = parentCommitment.localCommit.spec.htlcs
   }
   // @formatter:on
 
@@ -440,7 +459,8 @@ private class InteractiveTxBuilder(replyTo: ActorRef[InteractiveTxBuilder.Respon
   private val fundingPubkeyScript: ByteVector = Script.write(Script.pay2wsh(Scripts.multiSig2of2(localFundingPubKey, fundingParams.remoteFundingPubKey)))
   private val remoteNodeId = channelParams.remoteParams.nodeId
   private val previousTransactions: Seq[InteractiveTxBuilder.SignedSharedTransaction] = purpose match {
-    case rbf: PreviousTxRbf => rbf.previousTransactions
+    case rbf: FundingTxRbf => rbf.previousTransactions
+    case rbf: SpliceTxRbf => rbf.previousTransactions
     case _ => Nil
   }
 
@@ -775,7 +795,7 @@ private class InteractiveTxBuilder(replyTo: ActorRef[InteractiveTxBuilder.Respon
         val nextFeerate = Transactions.fee2rate(sharedTx.fees, tx.weight())
         if (nextFeerate <= previousFeerate) {
           log.warn("invalid interactive tx: next feerate isn't greater than previous feerate (previous={}, next={})", previousFeerate, nextFeerate)
-          return Left(InvalidCompleteInteractiveTx(fundingParams.channelId))
+          return Left(InvalidRbfFeerate(fundingParams.channelId, nextFeerate, previousFeerate))
         }
       case None =>
         val feeWithoutWitness = Transactions.weight2fee(fundingParams.targetFeerate, tx.weight())
@@ -791,7 +811,7 @@ private class InteractiveTxBuilder(replyTo: ActorRef[InteractiveTxBuilder.Respon
         }
         if (sharedTx.fees < minimumFee) {
           log.warn("invalid interactive tx: below the target feerate (target={}, actual={})", fundingParams.targetFeerate, Transactions.fee2rate(sharedTx.fees, tx.weight()))
-          return Left(InvalidCompleteInteractiveTx(fundingParams.channelId))
+          return Left(InvalidSpliceFeerate(fundingParams.channelId, Transactions.fee2rate(sharedTx.fees, tx.weight()), fundingParams.targetFeerate))
         }
     }
 
