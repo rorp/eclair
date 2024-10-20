@@ -481,7 +481,11 @@ object RouteCalculation {
       case Right(routes) =>
         // We use these shortest paths to find a set of non-conflicting HTLCs that send the total amount.
         split(amount, mutable.Queue(routes: _*), initializeUsedCapacity(pendingHtlcs), routeParams1) match {
-          case Right(routes) if validateMultiPartRoute(amount, maxFee, routes, routeParams.includeLocalChannelCost) => Right(routes)
+          case Right(routes) if validateMultiPartRoute(amount, maxFee, routes, routeParams.includeLocalChannelCost) =>
+            if (routeParams.blip18InboundFees)
+              Right(routes.map(r => routeWithInboundFees(r.amount,  r.hops, g)))
+            else
+              Right(routes)
           case _ => Left(RouteNotFound)
         }
       case Left(ex) => Left(ex)
