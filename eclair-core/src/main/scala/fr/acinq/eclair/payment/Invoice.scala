@@ -55,7 +55,7 @@ object Invoice {
       feeProportionalMillionths = u.feeProportionalMillionths,
       cltvExpiryDelta = u.cltvExpiryDelta,
       htlcMinimum = u.htlcMinimumMsat,
-      htlcMaximum_opt = Some(u.htlcMaximumMsat),
+      htlcMaximum_opt = Some(u.htlcMaximumMsat)
     )
   }
 
