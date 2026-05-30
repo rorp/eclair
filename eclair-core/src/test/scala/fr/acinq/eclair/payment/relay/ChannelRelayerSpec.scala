@@ -502,6 +502,66 @@ class ChannelRelayerSpec extends ScalaTestWithActorTestKit(ConfigFactory.load("a
     expectFwdFail(register, r.add.channelId, CMD_FAIL_HTLC(r.add.id, FailureReason.LocalFailure(FeeInsufficient(r.add.amountMsat, Some(u.channelUpdate))), None, commit = true))
   }
 
+  test("fail to relay when residual balance would drop below min-outbound-balance-msat") { f =>
+    import f._
+
+    // balance=100_000_000, outgoingAmount=10_000_000 → residual=90_000_000 < 95_000_000 → fail
+    val customNodeParams = nodeParams.modify(_.relayParams.minOutboundBalance).setTo(95_000_000 msat)
+    val customRelayer = testKit.spawn(ChannelRelayer.apply(customNodeParams, register.ref.toClassic, None))
+
+    val payload = ChannelRelay.Standard(realScid1, outgoingAmount, outgoingExpiry, upgradeAccountability = false)
+    val r = createValidIncomingPacket(payload)
+    val u = createLocalUpdate(channelId1)
+
+    customRelayer ! WrappedLocalChannelUpdate(u)
+    customRelayer ! Relay(r, TestConstants.Alice.nodeParams.nodeId, 0.1)
+
+    expectFwdFail(register, r.add.channelId, CMD_FAIL_HTLC(r.add.id, FailureReason.LocalFailure(TemporaryChannelFailure(Some(u.channelUpdate))), None, commit = true))
+    testKit.stop(customRelayer)
+  }
+
+  test("relay succeeds when residual balance exactly equals min-outbound-balance-msat") { f =>
+    import f._
+
+    // balance=100_000_000, outgoingAmount=10_000_000 → residual=90_000_000 == 90_000_000 → succeed
+    val customNodeParams = nodeParams.modify(_.relayParams.minOutboundBalance).setTo(90_000_000 msat)
+    val customRelayer = testKit.spawn(ChannelRelayer.apply(customNodeParams, register.ref.toClassic, None))
+
+    val payload = ChannelRelay.Standard(realScid1, outgoingAmount, outgoingExpiry, upgradeAccountability = false)
+    val r = createValidIncomingPacket(payload)
+    val u = createLocalUpdate(channelId1)
+
+    customRelayer ! WrappedLocalChannelUpdate(u)
+    customRelayer ! Relay(r, TestConstants.Alice.nodeParams.nodeId, 0.1)
+
+    expectFwdAdd(register, channelId1, outgoingAmount, outgoingExpiry, outAccountable = false)
+    testKit.stop(customRelayer)
+  }
+
+  test("min-outbound-balance-msat filters out channels that would drop below the threshold during channel selection") { f =>
+    import f._
+
+    // channel1: balance=100_000_000 → residual=90_000_000 >= 90_000_000 → ok
+    // channel2: balance= 95_000_000 → residual=85_000_000 <  90_000_000 → filtered out
+    val customNodeParams = nodeParams.modify(_.relayParams.minOutboundBalance).setTo(90_000_000 msat)
+    val customRelayer = testKit.spawn(ChannelRelayer.apply(customNodeParams, register.ref.toClassic, None))
+
+    val u1 = createLocalUpdate(channelId1, balance = 100_000_000 msat)
+    val u2 = createLocalUpdate(channelId2, balance = 95_000_000 msat)
+
+    // both channels point to realScid1 (same peer), channel2 would normally be preferred (lower balance)
+    val payload = ChannelRelay.Standard(realScid1, outgoingAmount, outgoingExpiry, upgradeAccountability = false)
+    val r = createValidIncomingPacket(payload)
+
+    customRelayer ! WrappedLocalChannelUpdate(u1)
+    customRelayer ! WrappedLocalChannelUpdate(u2)
+    customRelayer ! Relay(r, TestConstants.Alice.nodeParams.nodeId, 0.1)
+
+    // channel2 is excluded; channel1 is the only viable option
+    expectFwdAdd(register, channelId1, outgoingAmount, outgoingExpiry, outAccountable = false)
+    testKit.stop(customRelayer)
+  }
+
   test("relay that would fail (fee insufficient) with a recent channel update but succeed with the previous update") { f =>
     import f._
 

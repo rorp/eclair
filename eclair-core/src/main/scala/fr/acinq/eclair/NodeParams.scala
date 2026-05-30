@@ -651,6 +651,7 @@ object NodeParams extends Logging {
           maxRelayDuration = FiniteDuration(config.getDuration("relay.peer-reputation.max-relay-duration").getSeconds, TimeUnit.SECONDS),
         ),
         reservedBucket = config.getDouble("relay.reserved-for-accountable"),
+        minOutboundBalance = MilliSatoshi(config.getLong("relay.min-outbound-balance-msat")),
       ),
       db = database,
       autoReconnect = config.getBoolean("auto-reconnect"),

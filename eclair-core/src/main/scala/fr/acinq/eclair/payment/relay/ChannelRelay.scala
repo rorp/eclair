@@ -414,7 +414,7 @@ class ChannelRelay private(nodeParams: NodeParams,
    * channel, because some parameters don't match with our settings for that channel. In that case we directly fail the
    * htlc.
    */
-  private def relayOrFail(outgoingChannel: OutgoingChannelParams): RelayResult = {
+  private def relayOrFail(outgoingChannel: OutgoingChannel): RelayResult = {
     val update = outgoingChannel.channelUpdate
     validateRelayParams(outgoingChannel) match {
       case Some(fail) =>
@@ -427,7 +427,7 @@ class ChannelRelay private(nodeParams: NodeParams,
     }
   }
 
-  private def validateRelayParams(outgoingChannel: OutgoingChannelParams): Option[CMD_FAIL_HTLC] = {
+  private def validateRelayParams(outgoingChannel: OutgoingChannel): Option[CMD_FAIL_HTLC] = {
     val update = outgoingChannel.channelUpdate
     // If our current channel update was recently created, we accept payments that used our previous channel update.
     val allowPreviousUpdate = TimestampSecond.now() - update.timestamp <= nodeParams.relayParams.enforcementDelay
@@ -435,12 +435,17 @@ class ChannelRelay private(nodeParams: NodeParams,
     val htlcMinimumOk = update.htlcMinimumMsat <= r.amountToForward || prevUpdate_opt.exists(_.htlcMinimumMsat <= r.amountToForward)
     val expiryDeltaOk = update.cltvExpiryDelta <= r.expiryDelta || prevUpdate_opt.exists(_.cltvExpiryDelta <= r.expiryDelta)
     val feesOk = nodeFee(update.relayFees, r.amountToForward) <= r.relayFeeMsat || prevUpdate_opt.exists(u => nodeFee(u.relayFees, r.amountToForward) <= r.relayFeeMsat)
+    val minOutboundOk =
+        // only enforce the minimum when there is enough balance to relay; otherwise let the channel return InsufficientFunds
+      outgoingChannel.commitments.availableBalanceForSend < r.amountToForward || outgoingChannel.commitments.availableBalanceForSend - r.amountToForward >= nodeParams.relayParams.minOutboundBalance
     if (!htlcMinimumOk) {
       Some(makeCmdFailHtlc(r.add.id, AmountBelowMinimum(r.amountToForward, Some(update))))
     } else if (!expiryDeltaOk) {
       Some(makeCmdFailHtlc(r.add.id, IncorrectCltvExpiry(r.outgoingCltv, Some(update))))
     } else if (!feesOk) {
       Some(makeCmdFailHtlc(r.add.id, FeeInsufficient(r.add.amountMsat, Some(update))))
+    } else if (!minOutboundOk) {
+      Some(makeCmdFailHtlc(r.add.id, TemporaryChannelFailure(Some(update))))
     } else {
       None
     }
