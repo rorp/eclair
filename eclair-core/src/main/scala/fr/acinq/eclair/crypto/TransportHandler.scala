@@ -30,6 +30,7 @@ import fr.acinq.eclair.remote.EclairInternalsSerializer.RemoteTypes
 import fr.acinq.eclair.wire.protocol._
 import fr.acinq.eclair.{Diagnostics, FSMDiagnosticActorLogging, Logs, getSimpleClassName}
 import scodec.bits.ByteVector
+import scodec.codecs.uint16
 import scodec.{Attempt, Codec, DecodeResult}
 
 import java.nio.ByteOrder
@@ -116,7 +117,16 @@ class TransportHandler(keyPair: KeyPair, rs: Option[ByteVector], connection: Act
         m += (message -> (m.getOrElse(message, 0) + 1))
       case Attempt.Failure(err) =>
         log.warning("cannot deserialize {}: {}", plaintext.toHex, err.message)
-        return Left(plaintext)
+        // We don't want to close the connection when a peer relays a malformed gossip announcement (e.g. a legacy
+        // channel_update that doesn't include the now-mandatory htlc_maximum_msat): those come from arbitrary
+        // third-party nodes, so we simply ignore them and keep reading. Any other malformed message is a protocol
+        // violation with our direct peer and closes the connection.
+        uint16.decode(plaintext.bits) match {
+          case Attempt.Successful(DecodeResult(messageType, _)) if TransportHandler.gossipAnnouncementTypes.contains(messageType) =>
+            log.warning("ignoring malformed gossip message of type={}", messageType)
+          case _ =>
+            return Left(plaintext)
+        }
     })
     log.debug("decoded {} messages", m.values.sum)
     Right(m)
@@ -338,6 +348,12 @@ object TransportHandler {
   def props[T: ClassTag](keyPair: KeyPair, rs: Option[ByteVector], connection: ActorRef, codec: Codec[LightningMessage]): Props = Props(new TransportHandler(keyPair, rs, connection, codec))
 
   private val MAX_BUFFERED = 1000000L
+
+  // Broadcast gossip announcements (channel_announcement=256, node_announcement=257, channel_update=258) are relayed
+  // from arbitrary third-party nodes and may use legacy or forward-incompatible encodings. We don't want a single
+  // malformed announcement to tear down the connection to an otherwise well-behaved peer, so we ignore those instead
+  // of failing the connection.
+  private val gossipAnnouncementTypes: Set[Int] = Set(256, 257, 258)
 
   // see BOLT #8
   // this prefix is prepended to all Noise messages sent during the handshake phase

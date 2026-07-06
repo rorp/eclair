@@ -22,7 +22,7 @@ import akka.testkit.{TestActorRef, TestFSMRef, TestProbe}
 import fr.acinq.eclair.TestKitBaseClass
 import fr.acinq.eclair.crypto.Noise.{Chacha20Poly1305CipherFunctions, CipherState}
 import fr.acinq.eclair.crypto.TransportHandler.{Encryptor, ExtendedCipherState, Listener}
-import fr.acinq.eclair.wire.protocol.LightningMessageCodecs.{lightningMessageCodec, pingCodec, warningCodec}
+import fr.acinq.eclair.wire.protocol.LightningMessageCodecs.{lightningMessageCodec, pingCodec, pongCodec, warningCodec}
 import fr.acinq.eclair.wire.protocol.{LightningMessage, Ping, Pong, Warning}
 import org.scalatest.BeforeAndAfterAll
 import org.scalatest.funsuite.AnyFunSuiteLike
@@ -113,6 +113,47 @@ class TransportHandlerSpec extends TestKitBaseClass with AnyFunSuiteLike with Be
     probe1.expectTerminated(responder)
     probe1.watch(pipe)
     probe1.expectTerminated(pipe)
+  }
+
+  test("ignore malformed gossip messages without closing the connection") {
+    // The responder encodes a Pong under the channel_update type tag (258): the initiator sees a gossip message type it
+    // knows, but the body cannot be decoded as a channel_update. This mimics a peer relaying a legacy/malformed gossip
+    // announcement, which we want to ignore rather than treat as a fatal protocol violation.
+    val malformedGossipCodec: Codec[LightningMessage] = discriminated[LightningMessage].by(uint16)
+      .typecase(18, pingCodec)
+      .typecase(258, pongCodec)
+
+    val pipe = system.actorOf(Props[MyPipe]())
+    val probe1 = TestProbe()
+    val probe2 = TestProbe()
+    val initiator = TestFSMRef(new TransportHandler(Initiator.s, Some(Responder.s.pub), pipe, lightningMessageCodec))
+    val responder = TestFSMRef(new TransportHandler(Responder.s, None, pipe, malformedGossipCodec))
+    pipe ! (initiator, responder)
+
+    awaitCond(initiator.stateName == TransportHandler.WaitingForListener)
+    awaitCond(responder.stateName == TransportHandler.WaitingForListener)
+
+    initiator ! Listener(probe1.ref)
+    responder ! Listener(probe2.ref)
+
+    awaitCond(initiator.stateName == TransportHandler.Normal)
+    awaitCond(responder.stateName == TransportHandler.Normal)
+
+    // The initiator receives a malformed channel_update (type 258) that it cannot decode: it is silently ignored.
+    responder ! Pong(hex"deadbeef")
+    probe1.expectNoMessage(1 second)
+
+    // The connection is still alive: a subsequent valid message is received normally.
+    val ping = Ping(42, hex"deadbeef")
+    responder ! ping
+    probe1.expectMsg(ping)
+    probe1.reply(TransportHandler.ReadAck(ping))
+
+    assert(initiator.stateName == TransportHandler.Normal)
+
+    initiator.stop()
+    responder.stop()
+    system.stop(pipe)
   }
 
   test("handle messages split in chunks") {
